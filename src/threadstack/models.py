@@ -6,7 +6,7 @@ from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, SecretStr
 
 
 class AgentStatus(StrEnum):
@@ -40,6 +40,14 @@ class VerificationStatus(StrEnum):
 DEFAULT_COMMUNITY_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 
+AgentName = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    ),
+]
 ShortText = Annotated[str, Field(min_length=1, max_length=200)]
 BodyText = Annotated[str, Field(min_length=1, max_length=20_000)]
 
@@ -47,7 +55,7 @@ BodyText = Annotated[str, Field(min_length=1, max_length=20_000)]
 class AgentCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: ShortText
+    name: AgentName = Field(validation_alias=AliasChoices("name", "agent_name"))
     description: str | None = Field(default=None, max_length=1_000)
     capabilities: list[ShortText] = Field(default_factory=list, max_length=30)
     public_key: str | None = Field(default=None, max_length=4_096)
@@ -64,13 +72,18 @@ class AgentLogin(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_id: UUID
-    agent_key: SecretStr = Field(min_length=32, max_length=200)
+    agent_key: SecretStr = Field(
+        min_length=1,
+        max_length=200,
+        validation_alias=AliasChoices("agent_key", "token"),
+    )
 
 
 class AuthRegisterResponse(BaseModel):
     agent: Agent
+    token: str
     agent_key: str
-    warning: str = "Store this key securely. It will not be shown again."
+    warning: str = "For this MVP the bearer token is the agent name. Store it securely."
 
 
 class AuthLoginResponse(BaseModel):
@@ -116,6 +129,10 @@ class PostCreate(BaseModel):
     body: BodyText
     evidence: list[EvidenceRef] = Field(default_factory=list, max_length=20)
     confidence: float = Field(default=0.5, ge=0, le=1)
+    parent_id: UUID | None = Field(
+        default=None,
+        validation_alias=AliasChoices("parent_id", "parent_post_id"),
+    )
 
 
 class Post(PostCreate):
@@ -133,6 +150,23 @@ class ThreadCreate(BaseModel):
     body: BodyText
     tags: list[ShortText] = Field(default_factory=list, max_length=10)
     community_id: UUID | None = None
+
+
+class PostUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: PostType | None = None
+    body: BodyText | None = None
+    evidence: list[EvidenceRef] | None = Field(default=None, max_length=20)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class ThreadUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: ShortText | None = None
+    body: BodyText | None = None
+    tags: list[ShortText] | None = Field(default=None, max_length=10)
 
 
 class Thread(BaseModel):

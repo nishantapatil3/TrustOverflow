@@ -19,9 +19,11 @@ from .models import (
     Post,
     PostCreate,
     PostType,
+    PostUpdate,
     Thread,
     ThreadCreate,
     ThreadStatus,
+    ThreadUpdate,
     Verification,
     VerificationStatus,
     VerificationUpdate,
@@ -42,6 +44,10 @@ class ConflictError(StoreError):
 
 
 class AuthenticationError(StoreError):
+    pass
+
+
+class PermissionDeniedError(StoreError):
     pass
 
 
@@ -87,11 +93,11 @@ class ExchangeStore:
             if duplicate_name:
                 raise ConflictError("an agent with this name already exists")
 
-            agent_key = secrets.token_urlsafe(32)
             agent = Agent(id=uuid4(), created_at=utc_now(), **data.model_dump())
             self._agents[agent.id] = agent
-            self._agent_keys[agent.id] = digest_secret(agent_key)
-            return agent.model_copy(deep=True), agent_key
+            token = agent.name
+            self._agent_keys[agent.id] = digest_secret(token)
+            return agent.model_copy(deep=True), token
 
     def login(self, agent_id: UUID, agent_key: str) -> tuple[str, datetime, Agent]:
         with self._lock:
@@ -111,12 +117,21 @@ class ExchangeStore:
 
     def authenticate_session(self, access_token: str) -> Agent:
         with self._lock:
-            session_digest = digest_secret(access_token)
+            token_digest = digest_secret(access_token)
+            for agent_id, stored_digest in self._agent_keys.items():
+                if hmac.compare_digest(stored_digest, token_digest):
+                    return self.require_agent(agent_id).model_copy(deep=True)
+
+            session_digest = token_digest
             session = self._sessions.get(session_digest)
             if session is None or session.expires_at <= utc_now():
                 self._sessions.pop(session_digest, None)
                 raise AuthenticationError("invalid or expired access token")
             return self.require_agent(session.agent_id).model_copy(deep=True)
+
+    def authenticate_token(self, token: str) -> Agent:
+        """Authenticate the MVP bearer token, which is the registered agent name."""
+        return self.authenticate_session(token)
 
     def revoke_session(self, access_token: str) -> None:
         with self._lock:
@@ -246,6 +261,12 @@ class ExchangeStore:
             self.require_agent(author_id)
             if thread.status in {ThreadStatus.RESOLVED, ThreadStatus.CLOSED}:
                 raise ConflictError("cannot add a post to a resolved or closed thread")
+            if data.parent_id is not None:
+                parent = self._posts.get(data.parent_id)
+                if parent is None or parent.thread_id != thread_id:
+                    raise NotFoundError(
+                        f"parent post {data.parent_id} was not found in this thread"
+                    )
 
             post = Post(
                 id=uuid4(),
@@ -259,6 +280,90 @@ class ExchangeStore:
             thread.updated_at = post.created_at
             self._posts[post.id] = post
             return post.model_copy(deep=True)
+
+    def update_post(self, post_id: UUID, author_id: UUID, data: PostUpdate) -> Post:
+        with self._lock:
+            post = self._posts.get(post_id)
+            if post is None:
+                raise NotFoundError(f"post {post_id} was not found")
+            self.require_agent(author_id)
+            if post.author_id != author_id:
+                raise PermissionDeniedError("only the post author can edit this post")
+
+            changes = data.model_dump(exclude_unset=True)
+            if not changes:
+                raise ConflictError("at least one post field must be provided")
+            for field, value in changes.items():
+                setattr(post, field, value)
+            thread = self.require_thread(post.thread_id)
+            thread.updated_at = utc_now()
+            return post.model_copy(deep=True)
+
+    def delete_post(self, post_id: UUID, author_id: UUID) -> None:
+        with self._lock:
+            post = self._posts.get(post_id)
+            if post is None:
+                raise NotFoundError(f"post {post_id} was not found")
+            self.require_agent(author_id)
+            if post.author_id != author_id:
+                raise PermissionDeniedError("only the post author can delete this post")
+
+            thread = self.require_thread(post.thread_id)
+            if post.parent_id is None:
+                for thread_post in thread.posts:
+                    self._posts.pop(thread_post.id, None)
+                self._threads.pop(thread.id, None)
+                return
+
+            descendants = {post_id}
+            changed = True
+            while changed:
+                changed = False
+                for candidate in thread.posts:
+                    if candidate.parent_id in descendants and candidate.id not in descendants:
+                        descendants.add(candidate.id)
+                        changed = True
+            thread.posts = [
+                candidate for candidate in thread.posts if candidate.id not in descendants
+            ]
+            for descendant_id in descendants:
+                self._posts.pop(descendant_id, None)
+            thread.updated_at = utc_now()
+
+    def update_thread(self, thread_id: UUID, author_id: UUID, data: ThreadUpdate) -> Thread:
+        with self._lock:
+            thread = self.require_thread(thread_id)
+            self.require_agent(author_id)
+            if thread.author_id != author_id:
+                raise PermissionDeniedError("only the thread author can edit this thread")
+
+            changes = data.model_dump(exclude_unset=True)
+            if not changes:
+                raise ConflictError("at least one thread field must be provided")
+            if "title" in changes:
+                thread.title = changes["title"]
+            if "tags" in changes:
+                thread.tags = sorted({tag.casefold() for tag in changes["tags"]})
+            if "body" in changes:
+                root_post = next(
+                    (post for post in thread.posts if post.parent_id is None),
+                    None,
+                )
+                if root_post is None:
+                    raise ConflictError("thread has no root post")
+                root_post.body = changes["body"]
+            thread.updated_at = utc_now()
+            return thread.model_copy(deep=True)
+
+    def delete_thread(self, thread_id: UUID, author_id: UUID) -> None:
+        with self._lock:
+            thread = self.require_thread(thread_id)
+            self.require_agent(author_id)
+            if thread.author_id != author_id:
+                raise PermissionDeniedError("only the thread author can delete this thread")
+            for post in thread.posts:
+                self._posts.pop(post.id, None)
+            self._threads.pop(thread_id, None)
 
     def claim_thread(self, thread_id: UUID, agent_id: UUID, data: ClaimRequest) -> Thread:
         with self._lock:

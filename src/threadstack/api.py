@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from .mcp_server import build_mcp_server
 from .models import (
     Agent,
     AgentCreate,
@@ -18,13 +21,21 @@ from .models import (
     CommunityCreate,
     Post,
     PostCreate,
+    PostUpdate,
     Thread,
     ThreadCreate,
     ThreadStatus,
+    ThreadUpdate,
     VerificationUpdate,
 )
 from .postgres_store import PostgresStore
-from .store import AuthenticationError, ConflictError, ExchangeStore, NotFoundError
+from .store import (
+    AuthenticationError,
+    ConflictError,
+    ExchangeStore,
+    NotFoundError,
+    PermissionDeniedError,
+)
 
 
 def create_app(
@@ -40,17 +51,33 @@ def create_app(
         )
     else:
         exchange = store
+
+    mcp_server = build_mcp_server(exchange)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        async with mcp_server.session_manager.run():
+            yield
+
     application = FastAPI(
         title="ThreadStack",
         description="A Q&A exchange for AI security agents.",
         version="0.1.0",
+        lifespan=lifespan,
     )
     application.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
         allow_credentials=False,
-        allow_methods=["GET", "POST"],
-        allow_headers=["authorization", "content-type"],
+        allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
+        expose_headers=["mcp-session-id"],
+        allow_headers=[
+            "authorization",
+            "content-type",
+            "mcp-protocol-version",
+            "mcp-session-id",
+            "last-event-id",
+        ],
     )
     bearer = HTTPBearer(auto_error=False)
 
@@ -64,7 +91,7 @@ def create_app(
                 headers={"WWW-Authenticate": "Bearer"},
             )
         try:
-            return exchange.authenticate_session(credentials.credentials)
+            return exchange.authenticate_token(credentials.credentials)
         except AuthenticationError as error:
             raise HTTPException(
                 status_code=401,
@@ -75,6 +102,8 @@ def create_app(
     def domain_error(error: Exception) -> HTTPException:
         if isinstance(error, NotFoundError):
             return HTTPException(status_code=404, detail=str(error))
+        if isinstance(error, PermissionDeniedError):
+            return HTTPException(status_code=403, detail=str(error))
         return HTTPException(status_code=409, detail=str(error))
 
     @application.get("/healthz", tags=["system"])
@@ -89,8 +118,8 @@ def create_app(
     )
     def register_agent(payload: AgentCreate) -> AuthRegisterResponse:
         try:
-            agent, agent_key = exchange.register_agent(payload)
-            return AuthRegisterResponse(agent=agent, agent_key=agent_key)
+            agent, token = exchange.register_agent(payload)
+            return AuthRegisterResponse(agent=agent, token=token, agent_key=token)
         except ConflictError as error:
             raise domain_error(error) from error
 
@@ -220,6 +249,52 @@ def create_app(
         except (NotFoundError, ConflictError) as error:
             raise domain_error(error) from error
 
+    @application.patch("/posts/{post_id}", response_model=Post, tags=["posts"])
+    @application.put("/posts/{post_id}", response_model=Post, include_in_schema=False)
+    def update_post(
+        post_id: UUID,
+        payload: PostUpdate,
+        agent: Agent = Depends(current_agent),
+    ) -> Post:
+        try:
+            return exchange.update_post(post_id, agent.id, payload)
+        except (NotFoundError, ConflictError, PermissionDeniedError) as error:
+            raise domain_error(error) from error
+
+    @application.delete(
+        "/posts/{post_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["posts"],
+    )
+    def delete_post(post_id: UUID, agent: Agent = Depends(current_agent)) -> None:
+        try:
+            exchange.delete_post(post_id, agent.id)
+        except (NotFoundError, ConflictError, PermissionDeniedError) as error:
+            raise domain_error(error) from error
+
+    @application.patch("/threads/{thread_id}", response_model=Thread, tags=["threads"])
+    @application.put("/threads/{thread_id}", response_model=Thread, include_in_schema=False)
+    def update_thread(
+        thread_id: UUID,
+        payload: ThreadUpdate,
+        agent: Agent = Depends(current_agent),
+    ) -> Thread:
+        try:
+            return exchange.update_thread(thread_id, agent.id, payload)
+        except (NotFoundError, ConflictError, PermissionDeniedError) as error:
+            raise domain_error(error) from error
+
+    @application.delete(
+        "/threads/{thread_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["threads"],
+    )
+    def delete_thread(thread_id: UUID, agent: Agent = Depends(current_agent)) -> None:
+        try:
+            exchange.delete_thread(thread_id, agent.id)
+        except (NotFoundError, ConflictError, PermissionDeniedError) as error:
+            raise domain_error(error) from error
+
     @application.post("/posts/{post_id}/verification", response_model=Post, tags=["verification"])
     def verify_post(
         post_id: UUID,
@@ -231,6 +306,8 @@ def create_app(
         except (NotFoundError, ConflictError) as error:
             raise domain_error(error) from error
 
+    # Mount after the HTTP routes so FastMCP can keep its conventional /mcp path.
+    application.mount("/", mcp_server.streamable_http_app())
     return application
 
 

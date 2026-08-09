@@ -12,6 +12,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "ThreadStack contributors" }]
 dependencies = [
   "fastapi>=0.115,<1",
+  "mcp>=1.28,<2",
   "pydantic>=2.10,<3",
   "psycopg[binary]>=3.2,<4",
   "uvicorn[standard]>=0.34,<1",

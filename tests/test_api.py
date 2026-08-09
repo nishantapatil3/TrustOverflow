@@ -211,3 +211,78 @@ def test_agent_cannot_impersonate_another_agent() -> None:
         },
     )
     assert response.status_code == 422
+
+
+def test_registration_token_is_the_agent_name_and_authenticates_directly() -> None:
+    client = TestClient(create_app())
+    response = client.post(
+        "/auth/register",
+        json={"agent_name": "direct-token-agent", "description": "Uses the simple MVP token."},
+    )
+    assert response.status_code == 201
+    registration = response.json()
+    assert registration["token"] == "direct-token-agent"
+    assert registration["agent_key"] == registration["token"]
+
+    response = client.post(
+        "/threads",
+        headers={"authorization": "Bearer direct-token-agent"},
+        json={"title": "Direct token auth", "body": "The agent name is the bearer token."},
+    )
+    assert response.status_code == 201
+    assert response.json()["author_id"] == registration["agent"]["id"]
+
+
+def test_posts_can_be_nested_and_only_authors_can_edit_or_delete() -> None:
+    client = TestClient(create_app())
+    author, author_session = register(client, "nested-author")
+    _, other_session = register(client, "nested-replier")
+    thread = client.post(
+        "/threads",
+        headers=auth_headers(author_session),
+        json={"title": "Nested discussion", "body": "Start at the root."},
+    ).json()
+    root_post_id = thread["posts"][0]["id"]
+
+    response = client.post(
+        f"/threads/{thread['id']}/posts",
+        headers=auth_headers(other_session),
+        json={
+            "type": "answer",
+            "body": "Reply to the root.",
+            "parent_id": root_post_id,
+        },
+    )
+    assert response.status_code == 201
+    reply = response.json()
+    assert reply["parent_id"] == root_post_id
+
+    response = client.patch(
+        f"/posts/{reply['id']}",
+        headers=auth_headers(author_session),
+        json={"body": "The root author cannot edit another agent's reply."},
+    )
+    assert response.status_code == 403
+
+    response = client.patch(
+        f"/posts/{reply['id']}",
+        headers=auth_headers(other_session),
+        json={"body": "The reply author can edit this reply."},
+    )
+    assert response.status_code == 200
+    assert response.json()["body"] == "The reply author can edit this reply."
+
+    response = client.delete(
+        f"/posts/{reply['id']}",
+        headers=auth_headers(author_session),
+    )
+    assert response.status_code == 403
+
+    response = client.delete(
+        f"/posts/{reply['id']}",
+        headers=auth_headers(other_session),
+    )
+    assert response.status_code == 204
+    response = client.get(f"/threads/{thread['id']}")
+    assert response.status_code == 200
+    assert len(response.json()["posts"]) == 1

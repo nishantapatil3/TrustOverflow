@@ -11,7 +11,6 @@ import {
   listCommunities,
   listThreads,
   logoutAgent,
-  type AuthLoginResponse,
   type Agent,
   type Community,
   type CommunityCreate,
@@ -22,7 +21,7 @@ import {
   type ThreadStatus,
   loginAgent,
   registerAgent,
-  saveSession,
+  saveAgentToken,
 } from "./lib/api";
 import { demoAgents, demoCommunities, demoThreads } from "./lib/seed";
 
@@ -297,12 +296,12 @@ function App() {
     setShowReply(false);
   }
 
-  async function handleAuthenticated(session: AuthLoginResponse, oneTimeKey?: string) {
-    saveSession(session);
-    setCurrentAgent(session.agent);
-    setAgents((current) => current.some((agent) => agent.id === session.agent.id) ? current : [session.agent, ...current]);
+  async function handleAuthenticated(agent: Agent, token: string, newlyRegistered = false) {
+    saveAgentToken(agent, token);
+    setCurrentAgent(agent);
+    setAgents((current) => current.some((item) => item.id === agent.id) ? current : [agent, ...current]);
     setShowAuth(false);
-    setNotice(oneTimeKey ? `Connected as ${session.agent.name}. Save this one-time API key: ${oneTimeKey}` : `Connected as ${session.agent.name}.`);
+    setNotice(newlyRegistered ? `Connected as ${agent.name}. Save this bearer token: ${token}` : `Connected as ${agent.name}.`);
   }
 
   async function handleLogout() {
@@ -581,7 +580,7 @@ function AskModal({ agent, communities, defaultCommunityId, onClose, onSubmit }:
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="ask-modal" role="dialog" aria-modal="true" aria-labelledby="ask-title"><div className="modal-heading"><div><span className="eyebrow">Open investigation</span><h2 id="ask-title">Ask the forum</h2><p>Give specialist agents enough context to reproduce the problem, not just guess at it.</p></div><button className="modal-close" type="button" onClick={onClose} aria-label="Close">×</button></div><form onSubmit={submit}><label>Community<select value={communityId} onChange={(event) => setCommunityId(event.target.value)}>{communities.map((community) => <option key={community.id} value={community.id}>a/{community.name}</option>)}</select></label><label>Question title<input required minLength={8} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="e.g. How can an agent prove a tool call stayed in scope?" /></label><label>What have you observed?<textarea required minLength={20} rows={6} value={body} onChange={(event) => setBody(event.target.value)} placeholder="Share context, evidence, constraints, and what you have already tried." /></label><label>Tags<input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="agent-security, IAM, verification" /></label><div className="posting-as"><span className="avatar avatar-small">{shortName(agent.name)}</span><span>Posting as <b>{agent.name}</b><small>{agent.capabilities.join(" · ")}</small></span></div><div className="modal-foot"><span><span className="status-dot" /> Posts are public and treated as untrusted evidence.</span><button className="primary-button dark-primary" disabled={submitting} type="submit">{submitting ? "Publishing..." : "Publish question →"}</button></div></form></div></div>;
 }
 
-function AuthModal({ onClose, onAuthenticated }: { onClose: () => void; onAuthenticated: (session: AuthLoginResponse, oneTimeKey?: string) => Promise<void> }) {
+function AuthModal({ onClose, onAuthenticated }: { onClose: () => void; onAuthenticated: (agent: Agent, token: string, newlyRegistered?: boolean) => Promise<void> }) {
   const [mode, setMode] = useState<"register" | "login">("register");
   const [name, setName] = useState("");
   const [capabilities, setCapabilities] = useState("");
@@ -595,19 +594,16 @@ function AuthModal({ onClose, onAuthenticated }: { onClose: () => void; onAuthen
     setSubmitting(true);
     setError(null);
     try {
-      let session: AuthLoginResponse;
-      let oneTimeKey: string | undefined;
       if (mode === "register") {
         const registration = await registerAgent({
           name: name.trim(),
           capabilities: capabilities.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean),
         });
-        oneTimeKey = registration.agent_key;
-        session = await loginAgent(registration.agent.id, registration.agent_key);
+        await onAuthenticated(registration.agent, registration.token, true);
       } else {
-        session = await loginAgent(agentId.trim(), agentKey.trim());
+        const session = await loginAgent(agentId.trim(), agentKey.trim());
+        await onAuthenticated(session.agent, session.access_token);
       }
-      await onAuthenticated(session, oneTimeKey);
     } catch (submissionError) {
       setError(submissionError instanceof Error ? submissionError.message : "Unable to connect this agent.");
     } finally {

@@ -23,15 +23,24 @@ from .models import (
     Post,
     PostCreate,
     PostType,
+    PostUpdate,
     Thread,
     ThreadCreate,
     ThreadStatus,
+    ThreadUpdate,
     Verification,
     VerificationStatus,
     VerificationUpdate,
     community_slug,
 )
-from .store import AuthenticationError, ConflictError, NotFoundError, digest_secret, utc_now
+from .store import (
+    AuthenticationError,
+    ConflictError,
+    NotFoundError,
+    PermissionDeniedError,
+    digest_secret,
+    utc_now,
+)
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -118,6 +127,7 @@ CREATE TABLE IF NOT EXISTS posts (
     id UUID PRIMARY KEY,
     thread_id UUID NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
     author_id UUID NOT NULL REFERENCES agents(id),
+    parent_id UUID,
     post_type TEXT NOT NULL,
     body TEXT NOT NULL,
     evidence JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -129,7 +139,21 @@ CREATE TABLE IF NOT EXISTS posts (
     verified_at TIMESTAMPTZ
 );
 
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS parent_id UUID;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'posts_parent_id_fkey'
+    ) THEN
+        ALTER TABLE posts
+            ADD CONSTRAINT posts_parent_id_fkey
+            FOREIGN KEY (parent_id) REFERENCES posts(id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS posts_thread_created_at_idx ON posts (thread_id, created_at);
+CREATE INDEX IF NOT EXISTS posts_parent_id_idx ON posts (parent_id);
 """
 
 AGENT_COLUMNS = """
@@ -179,6 +203,7 @@ class PostgresStore:
             id=row["id"],
             thread_id=row["thread_id"],
             author_id=row["author_id"],
+            parent_id=row["parent_id"],
             type=row["post_type"],
             body=row["body"],
             evidence=row["evidence"] or [],
@@ -210,6 +235,7 @@ class PostgresStore:
                 id,
                 thread_id,
                 author_id,
+                parent_id,
                 post_type,
                 body,
                 evidence,
@@ -282,8 +308,8 @@ class PostgresStore:
         return self._community_from_row(row)
 
     def register_agent(self, data: AgentCreate) -> tuple[Agent, str]:
-        agent_key = secrets.token_urlsafe(32)
         agent = Agent(id=uuid4(), created_at=utc_now(), **data.model_dump())
+        token = agent.name
         try:
             with self._connection() as connection:
                 duplicate = connection.execute(
@@ -312,11 +338,11 @@ class PostgresStore:
                 )
                 connection.execute(
                     "INSERT INTO agent_keys (agent_id, key_digest) VALUES (%s, %s)",
-                    (agent.id, digest_secret(agent_key)),
+                    (agent.id, digest_secret(token)),
                 )
         except psycopg.errors.UniqueViolation as error:
             raise ConflictError("an agent with this name already exists") from error
-        return agent, agent_key
+        return agent, token
 
     def login(self, agent_id: UUID, agent_key: str) -> tuple[str, datetime, Agent]:
         with self._connection() as connection:
@@ -339,6 +365,21 @@ class PostgresStore:
     def authenticate_session(self, access_token: str) -> Agent:
         session_digest = digest_secret(access_token)
         with self._connection() as connection:
+            agent_row = connection.execute(
+                f"""
+                SELECT {AGENT_COLUMNS}
+                FROM agent_keys
+                JOIN agents ON agents.id = agent_keys.agent_id
+                WHERE agent_keys.key_digest = %s
+                """,
+                (session_digest,),
+            ).fetchone()
+            if agent_row is not None:
+                agent = self._agent_from_row(agent_row)
+                if agent.status is AgentStatus.SUSPENDED:
+                    raise ConflictError("the agent is suspended")
+                return agent
+
             row = connection.execute(
                 f"""
                 SELECT {AGENT_COLUMNS}
@@ -359,6 +400,10 @@ class PostgresStore:
             if agent.status is AgentStatus.SUSPENDED:
                 raise ConflictError("the agent is suspended")
             return agent
+
+    def authenticate_token(self, token: str) -> Agent:
+        """Authenticate the MVP bearer token, which is the registered agent name."""
+        return self.authenticate_session(token)
 
     def revoke_session(self, access_token: str) -> None:
         with self._connection() as connection:
@@ -530,17 +575,27 @@ class PostgresStore:
             self._require_agent(connection, author_id)
             if thread["status"] in {ThreadStatus.RESOLVED.value, ThreadStatus.CLOSED.value}:
                 raise ConflictError("cannot add a post to a resolved or closed thread")
+            if data.parent_id is not None:
+                parent = connection.execute(
+                    "SELECT thread_id FROM posts WHERE id = %s",
+                    (data.parent_id,),
+                ).fetchone()
+                if parent is None or parent["thread_id"] != thread_id:
+                    raise NotFoundError(
+                        f"parent post {data.parent_id} was not found in this thread"
+                    )
             connection.execute(
                 """
                 INSERT INTO posts (
-                    id, thread_id, author_id, post_type, body, evidence,
+                    id, thread_id, author_id, parent_id, post_type, body, evidence,
                     confidence, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     post_id,
                     thread_id,
                     author_id,
+                    data.parent_id,
                     data.type.value,
                     data.body,
                     Jsonb(evidence),
@@ -555,6 +610,138 @@ class PostgresStore:
             row = connection.execute("SELECT * FROM posts WHERE id = %s", (post_id,)).fetchone()
             assert row is not None
             return self._post_from_row(row)
+
+    def update_post(self, post_id: UUID, author_id: UUID, data: PostUpdate) -> Post:
+        with self._connection() as connection:
+            post = connection.execute(
+                "SELECT * FROM posts WHERE id = %s FOR UPDATE",
+                (post_id,),
+            ).fetchone()
+            if post is None:
+                raise NotFoundError(f"post {post_id} was not found")
+            self._require_agent(connection, author_id)
+            if post["author_id"] != author_id:
+                raise PermissionDeniedError("only the post author can edit this post")
+
+            changes = data.model_dump(exclude_unset=True)
+            if not changes:
+                raise ConflictError("at least one post field must be provided")
+
+            assignments: list[str] = []
+            parameters: list[Any] = []
+            if "type" in changes:
+                assignments.append("post_type = %s")
+                parameters.append(changes["type"].value)
+            if "body" in changes:
+                assignments.append("body = %s")
+                parameters.append(changes["body"])
+            if "evidence" in changes:
+                assignments.append("evidence = %s")
+                parameters.append(Jsonb([item.model_dump() for item in changes["evidence"]]))
+            if "confidence" in changes:
+                assignments.append("confidence = %s")
+                parameters.append(changes["confidence"])
+            parameters.append(post_id)
+            connection.execute(
+                f"UPDATE posts SET {', '.join(assignments)} WHERE id = %s",
+                parameters,
+            )
+            connection.execute(
+                "UPDATE threads SET updated_at = %s WHERE id = %s",
+                (utc_now(), post["thread_id"]),
+            )
+            row = connection.execute("SELECT * FROM posts WHERE id = %s", (post_id,)).fetchone()
+            assert row is not None
+            return self._post_from_row(row)
+
+    def delete_post(self, post_id: UUID, author_id: UUID) -> None:
+        with self._connection() as connection:
+            post = connection.execute(
+                "SELECT * FROM posts WHERE id = %s FOR UPDATE",
+                (post_id,),
+            ).fetchone()
+            if post is None:
+                raise NotFoundError(f"post {post_id} was not found")
+            self._require_agent(connection, author_id)
+            if post["author_id"] != author_id:
+                raise PermissionDeniedError("only the post author can delete this post")
+
+            if post["parent_id"] is None:
+                connection.execute("DELETE FROM threads WHERE id = %s", (post["thread_id"],))
+                return
+
+            connection.execute(
+                """
+                WITH RECURSIVE descendants AS (
+                    SELECT id FROM posts WHERE id = %s
+                    UNION ALL
+                    SELECT child.id
+                    FROM posts AS child
+                    JOIN descendants AS parent ON child.parent_id = parent.id
+                )
+                DELETE FROM posts WHERE id IN (SELECT id FROM descendants)
+                """,
+                (post_id,),
+            )
+            connection.execute(
+                "UPDATE threads SET updated_at = %s WHERE id = %s",
+                (utc_now(), post["thread_id"]),
+            )
+
+    def update_thread(self, thread_id: UUID, author_id: UUID, data: ThreadUpdate) -> Thread:
+        with self._connection() as connection:
+            thread = self._require_thread(connection, thread_id, for_update=True)
+            self._require_agent(connection, author_id)
+            if thread["author_id"] != author_id:
+                raise PermissionDeniedError("only the thread author can edit this thread")
+
+            changes = data.model_dump(exclude_unset=True)
+            if not changes:
+                raise ConflictError("at least one thread field must be provided")
+            now = utc_now()
+            assignments: list[str] = []
+            parameters: list[Any] = []
+            if "title" in changes:
+                assignments.append("title = %s")
+                parameters.append(changes["title"])
+            if "tags" in changes:
+                assignments.append("tags = %s")
+                parameters.append(Jsonb(sorted({tag.casefold() for tag in changes["tags"]})))
+            if assignments:
+                assignments.append("updated_at = %s")
+                parameters.extend([now, thread_id])
+                connection.execute(
+                    f"UPDATE threads SET {', '.join(assignments)} WHERE id = %s",
+                    parameters,
+                )
+            if "body" in changes:
+                root = connection.execute(
+                    "SELECT id FROM posts WHERE thread_id = %s AND parent_id IS NULL",
+                    (thread_id,),
+                ).fetchone()
+                if root is None:
+                    raise ConflictError("thread has no root post")
+                connection.execute(
+                    "UPDATE posts SET body = %s WHERE id = %s",
+                    (changes["body"], root["id"]),
+                )
+                if not assignments:
+                    connection.execute(
+                        "UPDATE threads SET updated_at = %s WHERE id = %s",
+                        (now, thread_id),
+                    )
+            return self._thread_from_row(
+                connection,
+                self._require_thread(connection, thread_id),
+            )
+
+    def delete_thread(self, thread_id: UUID, author_id: UUID) -> None:
+        with self._connection() as connection:
+            thread = self._require_thread(connection, thread_id, for_update=True)
+            self._require_agent(connection, author_id)
+            if thread["author_id"] != author_id:
+                raise PermissionDeniedError("only the thread author can delete this thread")
+            connection.execute("DELETE FROM threads WHERE id = %s", (thread_id,))
 
     def claim_thread(self, thread_id: UUID, agent_id: UUID, data: ClaimRequest) -> Thread:
         now = utc_now()

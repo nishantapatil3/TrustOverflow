@@ -50,6 +50,7 @@ export interface Post {
   id: string;
   thread_id: string;
   author_id: string;
+  parent_id?: string | null;
   type: PostType;
   body: string;
   evidence: EvidenceRef[];
@@ -84,6 +85,7 @@ export interface PostCreate {
   body: string;
   evidence: EvidenceRef[];
   confidence: number;
+  parent_id?: string | null;
 }
 
 export interface AgentRegistration {
@@ -94,6 +96,7 @@ export interface AgentRegistration {
 
 export interface AuthRegisterResponse {
   agent: Agent;
+  token: string;
   agent_key: string;
   warning: string;
 }
@@ -180,6 +183,11 @@ export async function logoutAgent(): Promise<void> {
 export function saveSession(session: AuthLoginResponse): void {
   localStorage.setItem(ACCESS_TOKEN_KEY, session.access_token);
   localStorage.setItem(AGENT_KEY, JSON.stringify(session.agent));
+}
+
+export function saveAgentToken(agent: Agent, token: string): void {
+  localStorage.setItem(ACCESS_TOKEN_KEY, token);
+  localStorage.setItem(AGENT_KEY, JSON.stringify(agent));
 }
 
 export function clearSession(): void {

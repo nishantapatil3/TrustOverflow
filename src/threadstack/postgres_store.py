@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hmac
 import secrets
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -14,6 +13,7 @@ from psycopg.types.json import Jsonb
 
 from .models import (
     DEFAULT_COMMUNITY_ID,
+    AccountType,
     Agent,
     AgentCreate,
     AgentStatus,
@@ -31,6 +31,7 @@ from .models import (
     Verification,
     VerificationStatus,
     VerificationUpdate,
+    agent_username,
     community_slug,
 )
 from .store import (
@@ -39,7 +40,11 @@ from .store import (
     NotFoundError,
     PermissionDeniedError,
     digest_secret,
+    email_username,
+    hash_password,
+    normalize_email,
     utc_now,
+    verify_password,
 )
 
 SCHEMA_SQL = """
@@ -51,10 +56,65 @@ CREATE TABLE IF NOT EXISTS agents (
     public_key TEXT,
     created_at TIMESTAMPTZ NOT NULL,
     reputation INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'active'
+    status TEXT NOT NULL DEFAULT 'active',
+    account_type TEXT NOT NULL DEFAULT 'agent',
+    owner_id UUID REFERENCES agents(id),
+    email TEXT,
+    CONSTRAINT agents_identity_shape_check CHECK (
+        (
+            account_type = 'user'
+            AND owner_id IS NULL
+            AND email IS NOT NULL
+        )
+        OR (
+            account_type = 'agent'
+            AND owner_id IS NOT NULL
+            AND email IS NULL
+        )
+    )
 );
 
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS account_type TEXT NOT NULL DEFAULT 'agent';
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS owner_id UUID;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS email TEXT;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'agents_owner_id_fkey'
+    ) THEN
+        ALTER TABLE agents
+            ADD CONSTRAINT agents_owner_id_fkey
+            FOREIGN KEY (owner_id) REFERENCES agents(id);
+    END IF;
+END $$;
+
+ALTER TABLE agents DROP CONSTRAINT IF EXISTS agents_identity_shape_check;
+ALTER TABLE agents
+    ADD CONSTRAINT agents_identity_shape_check CHECK (
+        (
+            account_type = 'user'
+            AND owner_id IS NULL
+            AND email IS NOT NULL
+        )
+        OR (
+            account_type = 'agent'
+            AND owner_id IS NOT NULL
+            AND email IS NULL
+        )
+    ) NOT VALID;
+
 CREATE UNIQUE INDEX IF NOT EXISTS agents_name_lower_idx ON agents (LOWER(name));
+CREATE UNIQUE INDEX IF NOT EXISTS agents_email_lower_idx
+    ON agents (LOWER(email))
+    WHERE email IS NOT NULL;
+CREATE INDEX IF NOT EXISTS agents_owner_id_idx ON agents (owner_id, created_at);
+
+CREATE TABLE IF NOT EXISTS user_credentials (
+    user_id UUID PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    password_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS communities (
     id UUID PRIMARY KEY,
@@ -164,7 +224,10 @@ AGENT_COLUMNS = """
     public_key,
     created_at,
     reputation,
-    status
+    status,
+    account_type,
+    owner_id,
+    email
 """
 
 
@@ -195,6 +258,9 @@ class PostgresStore:
             created_at=row["created_at"],
             reputation=row["reputation"],
             status=row["status"],
+            account_type=row["account_type"],
+            owner_id=row["owner_id"],
+            email=row["email"],
         )
 
     @staticmethod
@@ -307,11 +373,27 @@ class PostgresStore:
             raise NotFoundError(f"community {community_id} was not found")
         return self._community_from_row(row)
 
-    def register_agent(self, data: AgentCreate) -> tuple[Agent, str]:
-        agent = Agent(id=uuid4(), created_at=utc_now(), **data.model_dump())
-        token = agent.name
+    def register_agent(self, owner_id: UUID, data: AgentCreate) -> tuple[Agent, str]:
+        name = agent_username(data.name)
+        if len(name) > 80:
+            raise ConflictError("agent names must be at most 74 characters before the prefix")
+        if name == "agent-":
+            raise ConflictError("agent names must include a name after the agent- prefix")
+        agent_data = data.model_dump()
+        agent_data["name"] = name
+        agent = Agent(
+            id=uuid4(),
+            created_at=utc_now(),
+            owner_id=owner_id,
+            account_type=AccountType.AGENT,
+            **agent_data,
+        )
+        token = secrets.token_urlsafe(32)
         try:
             with self._connection() as connection:
+                owner = self._require_agent(connection, owner_id)
+                if owner.account_type is not AccountType.USER or owner.email is None:
+                    raise PermissionDeniedError("agents must be created by an email user")
                 duplicate = connection.execute(
                     "SELECT 1 FROM agents WHERE LOWER(name) = LOWER(%s)",
                     (agent.name,),
@@ -322,8 +404,8 @@ class PostgresStore:
                     """
                     INSERT INTO agents (
                         id, name, description, capabilities, public_key,
-                        created_at, reputation, status
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        created_at, reputation, status, account_type, owner_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         agent.id,
@@ -334,6 +416,8 @@ class PostgresStore:
                         agent.created_at,
                         agent.reputation,
                         agent.status.value,
+                        agent.account_type.value,
+                        agent.owner_id,
                     ),
                 )
                 connection.execute(
@@ -344,16 +428,114 @@ class PostgresStore:
             raise ConflictError("an agent with this name already exists") from error
         return agent, token
 
-    def login(self, agent_id: UUID, agent_key: str) -> tuple[str, datetime, Agent]:
+    def rotate_agent_token(self, owner_id: UUID, agent_id: UUID) -> tuple[Agent, str]:
+        token = secrets.token_urlsafe(32)
+        with self._connection() as connection:
+            owner = self._require_agent(connection, owner_id)
+            if owner.account_type is not AccountType.USER or owner.email is None:
+                raise PermissionDeniedError("only email users can recover agent tokens")
+            agent = self._require_agent(connection, agent_id)
+            if agent.account_type is not AccountType.AGENT or agent.owner_id != owner.id:
+                raise PermissionDeniedError(
+                    "this agent is not owned by the signed-in user"
+                )
+
+            connection.execute(
+                """
+                INSERT INTO agent_keys (agent_id, key_digest) VALUES (%s, %s)
+                ON CONFLICT (agent_id) DO UPDATE SET key_digest = EXCLUDED.key_digest
+                """,
+                (agent.id, digest_secret(token)),
+            )
+            connection.execute("DELETE FROM sessions WHERE agent_id = %s", (agent.id,))
+            return agent, token
+
+    def login_or_create_user(self, email: str, password: str) -> tuple[Agent, bool]:
+        normalized_email = normalize_email(email)
+        try:
+            with self._connection() as connection:
+                existing = connection.execute(
+                    f"SELECT {AGENT_COLUMNS} FROM agents WHERE LOWER(email) = LOWER(%s)",
+                    (normalized_email,),
+                ).fetchone()
+                if existing is not None:
+                    credentials = connection.execute(
+                        "SELECT password_hash FROM user_credentials WHERE user_id = %s",
+                        (existing["id"],),
+                    ).fetchone()
+                    if credentials is None or not verify_password(
+                        password,
+                        credentials["password_hash"],
+                    ):
+                        raise AuthenticationError("invalid email or password")
+                    return self._agent_from_row(existing), False
+
+                used_names = {
+                    row["name"].casefold()
+                    for row in connection.execute("SELECT name FROM agents").fetchall()
+                }
+                name = email_username(normalized_email)
+                if name.casefold() in used_names:
+                    name = f"user-{uuid4().hex[:12]}"
+
+                user = Agent(
+                    id=uuid4(),
+                    name=name,
+                    capabilities=[],
+                    created_at=utc_now(),
+                    account_type=AccountType.USER,
+                    email=normalized_email,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO agents (
+                        id, name, description, capabilities, public_key,
+                        created_at, reputation, status, account_type, owner_id, email
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        user.id,
+                        user.name,
+                        user.description,
+                        Jsonb(user.capabilities),
+                        user.public_key,
+                        user.created_at,
+                        user.reputation,
+                        user.status.value,
+                        user.account_type.value,
+                        user.owner_id,
+                        user.email,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO user_credentials (user_id, password_hash, created_at)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (user.id, hash_password(password), user.created_at),
+                )
+                return user, True
+        except psycopg.errors.UniqueViolation as error:
+            with self._connection() as connection:
+                existing = connection.execute(
+                    f"SELECT {AGENT_COLUMNS} FROM agents WHERE LOWER(email) = LOWER(%s)",
+                    (normalized_email,),
+                ).fetchone()
+                if existing is not None:
+                    credentials = connection.execute(
+                        "SELECT password_hash FROM user_credentials WHERE user_id = %s",
+                        (existing["id"],),
+                    ).fetchone()
+                    if credentials is not None and verify_password(
+                        password,
+                        credentials["password_hash"],
+                    ):
+                        return self._agent_from_row(existing), False
+            raise AuthenticationError("invalid email or password") from error
+
+    def create_session(self, agent_id: UUID) -> tuple[str, datetime, Agent]:
         with self._connection() as connection:
             agent = self._require_agent(connection, agent_id)
-            row = connection.execute(
-                "SELECT key_digest FROM agent_keys WHERE agent_id = %s",
-                (agent_id,),
-            ).fetchone()
-            if row is None or not hmac.compare_digest(row["key_digest"], digest_secret(agent_key)):
-                raise AuthenticationError("invalid agent credentials")
-
             access_token = secrets.token_urlsafe(32)
             expires_at = utc_now() + timedelta(hours=24)
             connection.execute(
@@ -402,7 +584,7 @@ class PostgresStore:
             return agent
 
     def authenticate_token(self, token: str) -> Agent:
-        """Authenticate the MVP bearer token, which is the registered agent name."""
+        """Authenticate an agent credential or short-lived login session."""
         return self.authenticate_session(token)
 
     def revoke_session(self, access_token: str) -> None:
@@ -416,6 +598,17 @@ class PostgresStore:
         with self._connection() as connection:
             rows = connection.execute(
                 f"SELECT {AGENT_COLUMNS} FROM agents ORDER BY created_at, id"
+            ).fetchall()
+            return [self._agent_from_row(row) for row in rows]
+
+    def list_owned_agents(self, owner_id: UUID) -> list[Agent]:
+        with self._connection() as connection:
+            owner = self._require_agent(connection, owner_id)
+            if owner.account_type is not AccountType.USER or owner.email is None:
+                raise PermissionDeniedError("only email users can own agents")
+            rows = connection.execute(
+                f"SELECT {AGENT_COLUMNS} FROM agents WHERE owner_id = %s ORDER BY created_at, id",
+                (owner_id,),
             ).fetchall()
             return [self._agent_from_row(row) for row in rows]
 

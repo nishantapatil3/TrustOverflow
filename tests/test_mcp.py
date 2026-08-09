@@ -1,6 +1,8 @@
 from fastapi.testclient import TestClient
 
 from threadstack.api import create_app
+from threadstack.models import AgentCreate
+from threadstack.store import ExchangeStore
 
 MCP_HEADERS = {
     "accept": "application/json",
@@ -33,8 +35,18 @@ def mcp_call(
     return response.json()["result"]
 
 
-def test_mcp_registers_agents_and_creates_nested_threads() -> None:
-    with TestClient(create_app()) as client:
+def test_owner_created_agent_uses_mcp_to_create_nested_threads() -> None:
+    store = ExchangeStore()
+    owner, _ = store.login_or_create_user(
+        "mcp-owner@example.com",
+        "correct-horse-battery-staple",
+    )
+    _, token = store.register_agent(
+        owner.id,
+        AgentCreate(name="mcp-test-agent", description="MCP test agent"),
+    )
+
+    with TestClient(create_app(store=store)) as client:
         response = client.post(
             "/mcp/",
             headers={"accept": "application/json", "content-type": "application/json"},
@@ -51,17 +63,9 @@ def test_mcp_registers_agents_and_creates_nested_threads() -> None:
         )
         assert response.status_code == 200
 
-        registration = mcp_call(
-            client,
-            2,
-            "register_agent",
-            {"agent_name": "mcp-test-agent", "description": "MCP test agent"},
-        )
-        assert registration["structuredContent"]["token"] == "mcp-test-agent"
-
         unauthenticated = mcp_call(
             client,
-            3,
+            2,
             "create_thread",
             {"title": "Should not post", "body": "A token is required."},
         )
@@ -69,23 +73,23 @@ def test_mcp_registers_agents_and_creates_nested_threads() -> None:
 
         thread_result = mcp_call(
             client,
-            4,
+            3,
             "create_thread",
             {"title": "MCP nested thread", "body": "Root post."},
-            token="mcp-test-agent",
+            token=token,
         )
         thread = thread_result["structuredContent"]
         root_post_id = thread["posts"][0]["id"]
 
         reply_result = mcp_call(
             client,
-            5,
+            4,
             "post_reply",
             {
                 "thread_id": thread["id"],
                 "body": "Nested MCP reply.",
                 "parent_id": root_post_id,
             },
-            token="mcp-test-agent",
+            token=token,
         )
         assert reply_result["structuredContent"]["parent_id"] == root_post_id

@@ -4,24 +4,37 @@ from fastapi.testclient import TestClient
 
 from threadstack.api import create_app
 
+DEFAULT_PASSWORD = "correct-horse-battery-staple"
+
+
+def sign_in_owner(
+    client: TestClient,
+    *,
+    email: str = "owner@example.com",
+    password: str = DEFAULT_PASSWORD,
+) -> dict:
+    response = client.post(
+        "/auth/login",
+        json={"email": email, "password": password},
+    )
+    assert response.status_code == 200
+    return response.json()["user"]
+
 
 def register(
     client: TestClient,
     name: str,
     capabilities: list[str] | None = None,
 ) -> tuple[dict, dict]:
+    owner = sign_in_owner(client)
     response = client.post(
-        "/auth/register",
+        "/auth/me/agents",
         json={"name": name, "capabilities": capabilities or []},
     )
     assert response.status_code == 201
     registration = response.json()
-    response = client.post(
-        "/auth/login",
-        json={"agent_id": registration["agent"]["id"], "agent_key": registration["agent_key"]},
-    )
-    assert response.status_code == 200
-    return registration["agent"], response.json()
+    assert registration["agent"]["owner_id"] == owner["id"]
+    return registration["agent"], {"access_token": registration["token"]}
 
 
 def auth_headers(session: dict) -> dict[str, str]:
@@ -213,24 +226,172 @@ def test_agent_cannot_impersonate_another_agent() -> None:
     assert response.status_code == 422
 
 
-def test_registration_token_is_the_agent_name_and_authenticates_directly() -> None:
+def test_agent_registration_adds_the_agent_prefix_and_issues_a_random_token() -> None:
     client = TestClient(create_app())
+    owner = sign_in_owner(client)
     response = client.post(
-        "/auth/register",
-        json={"agent_name": "direct-token-agent", "description": "Uses the simple MVP token."},
+        "/auth/me/agents",
+        json={"agent_name": "direct-token-agent", "description": "Uses a private token."},
     )
     assert response.status_code == 201
     registration = response.json()
-    assert registration["token"] == "direct-token-agent"
+    assert registration["agent"]["name"] == "agent-direct-token-agent"
+    assert registration["agent"]["owner_id"] == owner["id"]
+    assert registration["agent"]["account_type"] == "agent"
+    assert registration["token"] != registration["agent"]["name"]
+    assert len(registration["token"]) >= 32
     assert registration["agent_key"] == registration["token"]
 
     response = client.post(
         "/threads",
-        headers={"authorization": "Bearer direct-token-agent"},
-        json={"title": "Direct token auth", "body": "The agent name is the bearer token."},
+        headers={"authorization": f"Bearer {registration['token']}"},
+        json={"title": "Direct token auth", "body": "The private token authenticates this agent."},
     )
     assert response.status_code == 201
     assert response.json()["author_id"] == registration["agent"]["id"]
+
+    response = client.post("/auth/me/agents", json={"name": "agent-already-prefixed"})
+    assert response.status_code == 201
+    assert response.json()["agent"]["name"] == "agent-already-prefixed"
+    assert response.json()["token"] != "agent-already-prefixed"
+
+    response = client.post(
+        "/auth/me/agents",
+        headers={"authorization": f"Bearer {registration['token']}"},
+        json={"name": "child-agent"},
+    )
+    assert response.status_code == 403
+
+    other_owner = sign_in_owner(client, email="other-owner@example.com")
+    assert other_owner["id"] != owner["id"]
+    assert client.get("/auth/me/agents").json() == []
+    response = client.get(
+        "/auth/me/agents",
+        headers={"authorization": f"Bearer {registration['token']}"},
+    )
+    assert response.status_code == 403
+
+
+def test_email_owner_can_replace_a_lost_agent_token() -> None:
+    client = TestClient(create_app())
+    owner = sign_in_owner(client)
+    registration = client.post(
+        "/auth/me/agents",
+        json={"name": "recoverable-agent"},
+    ).json()
+    agent = registration["agent"]
+    old_token = registration["token"]
+
+    store = client.app.state.exchange
+    old_session, _, _ = store.create_session(UUID(agent["id"]))
+
+    recovered = client.post(f"/auth/me/agents/{agent['id']}/token")
+    assert recovered.status_code == 200
+    replacement = recovered.json()
+    assert replacement["agent"]["owner_id"] == owner["id"]
+    assert replacement["token"] != old_token
+    assert replacement["agent_key"] == replacement["token"]
+
+    old_token_auth = client.get(
+        "/auth/me",
+        headers={"authorization": f"Bearer {old_token}"},
+    )
+    old_session_auth = client.get(
+        "/auth/me",
+        headers={"authorization": f"Bearer {old_session}"},
+    )
+    assert old_token_auth.status_code == 401
+    assert old_session_auth.status_code == 401
+    current = client.get(
+        "/auth/me",
+        headers={"authorization": f"Bearer {replacement['token']}"},
+    )
+    assert current.status_code == 200
+    assert current.json()["id"] == agent["id"]
+
+    other_owner = sign_in_owner(client, email="other-owner@example.com")
+    assert other_owner["id"] != owner["id"]
+    assert client.post(f"/auth/me/agents/{agent['id']}/token").status_code == 403
+
+    response = client.post(
+        f"/auth/me/agents/{agent['id']}/token",
+        headers={"authorization": f"Bearer {replacement['token']}"},
+    )
+    assert response.status_code == 403
+
+
+def test_first_email_login_creates_a_user_who_can_own_multiple_agents() -> None:
+    client = TestClient(create_app())
+
+    assert client.post("/auth/me/agents", json={"name": "octocat"}).status_code == 401
+    response = client.post(
+        "/auth/login",
+        json={"email": "Octo.Cat@Example.com", "password": DEFAULT_PASSWORD},
+    )
+    assert response.status_code == 200
+    assert response.json()["first_login"] is True
+    assert client.cookies.get("threadstack_session")
+    user = response.json()["user"]
+    assert user["email"] == "octo.cat@example.com"
+    assert user["account_type"] == "user"
+    assert user["owner_id"] is None
+
+    public_user = next(item for item in client.get("/agents").json() if item["id"] == user["id"])
+    assert "email" not in public_user
+
+    first_agent = client.post(
+        "/auth/me/agents",
+        json={"name": "octocat", "capabilities": ["triage"]},
+    )
+    second_agent = client.post(
+        "/auth/me/agents",
+        json={"name": "reviewer", "capabilities": ["verification"]},
+    )
+    assert first_agent.status_code == 201
+    assert second_agent.status_code == 201
+    assert first_agent.json()["agent"]["name"] == "agent-octocat"
+    assert second_agent.json()["agent"]["name"] == "agent-reviewer"
+    assert first_agent.json()["agent"]["owner_id"] == user["id"]
+    assert second_agent.json()["agent"]["owner_id"] == user["id"]
+
+    owned_agents = client.get("/auth/me/agents")
+    assert [item["name"] for item in owned_agents.json()] == [
+        "agent-octocat",
+        "agent-reviewer",
+    ]
+
+    response = client.post(
+        "/threads",
+        json={"title": "Email cookie session", "body": "The browser session is authenticated."},
+    )
+    assert response.status_code == 201
+    assert response.json()["author_id"] == user["id"]
+
+
+def test_returning_email_login_requires_the_original_password() -> None:
+    client = TestClient(create_app())
+    first = client.post(
+        "/auth/login",
+        json={"email": "owner@example.com", "password": DEFAULT_PASSWORD},
+    ).json()
+    client.post("/auth/logout")
+
+    rejected = client.post(
+        "/auth/login",
+        json={"email": "owner@example.com", "password": "different-password"},
+    )
+    assert rejected.status_code == 401
+    assert client.cookies.get("threadstack_session") is None
+
+    returning = client.post(
+        "/auth/login",
+        json={"email": "OWNER@EXAMPLE.COM", "password": DEFAULT_PASSWORD},
+    )
+    assert returning.status_code == 200
+    assert returning.json()["first_login"] is False
+    assert returning.json()["user"]["id"] == first["user"]["id"]
+    assert client.get("/auth/github").status_code == 404
+    assert client.post("/auth/register", json={"name": "unused"}).status_code == 404
 
 
 def test_posts_can_be_nested_and_only_authors_can_edit_or_delete() -> None:

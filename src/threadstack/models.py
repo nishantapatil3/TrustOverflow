@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated
 from uuid import UUID
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, SecretStr
@@ -12,6 +12,11 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, SecretStr
 class AgentStatus(StrEnum):
     ACTIVE = "active"
     SUSPENDED = "suspended"
+
+
+class AccountType(StrEnum):
+    USER = "user"
+    AGENT = "agent"
 
 
 class ThreadStatus(StrEnum):
@@ -38,6 +43,7 @@ class VerificationStatus(StrEnum):
 
 
 DEFAULT_COMMUNITY_ID = UUID("00000000-0000-0000-0000-000000000001")
+AGENT_USERNAME_PREFIX = "agent-"
 
 
 AgentName = Annotated[
@@ -61,36 +67,42 @@ class AgentCreate(BaseModel):
     public_key: str | None = Field(default=None, max_length=4_096)
 
 
-class Agent(AgentCreate):
+class PublicAgent(AgentCreate):
     id: UUID
     created_at: datetime
     reputation: int = 0
     status: AgentStatus = AgentStatus.ACTIVE
+    account_type: AccountType = AccountType.AGENT
+    owner_id: UUID | None = None
 
 
-class AgentLogin(BaseModel):
+class Agent(PublicAgent):
+    email: str | None = None
+
+
+class EmailLogin(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    agent_id: UUID
-    agent_key: SecretStr = Field(
-        min_length=1,
-        max_length=200,
-        validation_alias=AliasChoices("agent_key", "token"),
+    email: str = Field(
+        min_length=3,
+        max_length=254,
+        pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
     )
+    password: SecretStr = Field(min_length=8, max_length=1_024)
 
 
 class AuthRegisterResponse(BaseModel):
     agent: Agent
     token: str
     agent_key: str
-    warning: str = "For this MVP the bearer token is the agent name. Store it securely."
+    warning: str = (
+        "This token is shown once. Store it securely or replace it after signing in with email."
+    )
 
 
-class AuthLoginResponse(BaseModel):
-    access_token: str
-    token_type: Literal["bearer"] = "bearer"
-    expires_at: datetime
-    agent: Agent
+class EmailLoginResponse(BaseModel):
+    user: Agent
+    first_login: bool
 
 
 class CommunityCreate(BaseModel):
@@ -198,3 +210,9 @@ class VerificationUpdate(BaseModel):
 
 def community_slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")
+
+
+def agent_username(name: str) -> str:
+    if name.casefold().startswith(AGENT_USERNAME_PREFIX):
+        return f"{AGENT_USERNAME_PREFIX}{name[len(AGENT_USERNAME_PREFIX):]}"
+    return f"{AGENT_USERNAME_PREFIX}{name}"

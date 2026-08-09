@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from threading import RLock
@@ -10,6 +12,7 @@ from uuid import UUID, uuid4
 
 from .models import (
     DEFAULT_COMMUNITY_ID,
+    AccountType,
     Agent,
     AgentCreate,
     AgentStatus,
@@ -27,6 +30,7 @@ from .models import (
     Verification,
     VerificationStatus,
     VerificationUpdate,
+    agent_username,
     community_slug,
 )
 
@@ -65,6 +69,56 @@ def digest_secret(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def normalize_email(value: str) -> str:
+    return value.strip().casefold()
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    password_digest = hashlib.scrypt(
+        password.encode("utf-8"),
+        salt=salt,
+        n=2**14,
+        r=8,
+        p=1,
+        dklen=32,
+    )
+    return "$".join(
+        (
+            "scrypt",
+            urlsafe_b64encode(salt).decode("ascii"),
+            urlsafe_b64encode(password_digest).decode("ascii"),
+        )
+    )
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    try:
+        algorithm, encoded_salt, encoded_digest = encoded.split("$", 2)
+        if algorithm != "scrypt":
+            return False
+        salt = urlsafe_b64decode(encoded_salt.encode("ascii"))
+        expected = urlsafe_b64decode(encoded_digest.encode("ascii"))
+        candidate = hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=salt,
+            n=2**14,
+            r=8,
+            p=1,
+            dklen=len(expected),
+        )
+        return hmac.compare_digest(expected, candidate)
+    except (ValueError, TypeError):
+        return False
+
+
+def email_username(email: str) -> str:
+    local_part = email.partition("@")[0]
+    stem = re.sub(r"[^a-z0-9._-]+", "-", local_part.casefold()).strip("-._") or "user"
+    suffix = digest_secret(email)[:8]
+    return f"{stem[:60]}-{suffix}"
+
+
 class ExchangeStore:
     """Thread-safe in-memory store used by the MVP and its tests."""
 
@@ -72,6 +126,8 @@ class ExchangeStore:
         self._lock = RLock()
         self._agents: dict[UUID, Agent] = {}
         self._agent_keys: dict[UUID, str] = {}
+        self._email_users: dict[str, UUID] = {}
+        self._user_passwords: dict[UUID, str] = {}
         self._sessions: dict[str, Session] = {}
         self._communities: dict[UUID, Community] = {
             DEFAULT_COMMUNITY_ID: Community(
@@ -85,28 +141,83 @@ class ExchangeStore:
         self._threads: dict[UUID, Thread] = {}
         self._posts: dict[UUID, Post] = {}
 
-    def register_agent(self, data: AgentCreate) -> tuple[Agent, str]:
+    def register_agent(self, owner_id: UUID, data: AgentCreate) -> tuple[Agent, str]:
         with self._lock:
+            owner = self.require_agent(owner_id)
+            if owner.account_type is not AccountType.USER or owner.email is None:
+                raise PermissionDeniedError("agents must be created by an email user")
+            name = agent_username(data.name)
+            if len(name) > 80:
+                raise ConflictError("agent names must be at most 74 characters before the prefix")
+            if name == "agent-":
+                raise ConflictError("agent names must include a name after the agent- prefix")
             duplicate_name = any(
-                agent.name.casefold() == data.name.casefold() for agent in self._agents.values()
+                agent.name.casefold() == name.casefold() for agent in self._agents.values()
             )
             if duplicate_name:
                 raise ConflictError("an agent with this name already exists")
 
-            agent = Agent(id=uuid4(), created_at=utc_now(), **data.model_dump())
+            agent_data = data.model_dump()
+            agent_data["name"] = name
+            agent = Agent(
+                id=uuid4(),
+                created_at=utc_now(),
+                owner_id=owner.id,
+                account_type=AccountType.AGENT,
+                **agent_data,
+            )
             self._agents[agent.id] = agent
-            token = agent.name
+            token = secrets.token_urlsafe(32)
             self._agent_keys[agent.id] = digest_secret(token)
             return agent.model_copy(deep=True), token
 
-    def login(self, agent_id: UUID, agent_key: str) -> tuple[str, datetime, Agent]:
+    def rotate_agent_token(self, owner_id: UUID, agent_id: UUID) -> tuple[Agent, str]:
+        with self._lock:
+            owner = self.require_agent(owner_id)
+            if owner.account_type is not AccountType.USER or owner.email is None:
+                raise PermissionDeniedError("only email users can recover agent tokens")
+            agent = self.require_agent(agent_id)
+            if agent.account_type is not AccountType.AGENT or agent.owner_id != owner.id:
+                raise PermissionDeniedError("this agent is not owned by the signed-in user")
+
+            token = secrets.token_urlsafe(32)
+            self._agent_keys[agent.id] = digest_secret(token)
+            self._sessions = {
+                digest: session
+                for digest, session in self._sessions.items()
+                if session.agent_id != agent.id
+            }
+            return agent.model_copy(deep=True), token
+
+    def login_or_create_user(self, email: str, password: str) -> tuple[Agent, bool]:
+        with self._lock:
+            normalized_email = normalize_email(email)
+            existing_id = self._email_users.get(normalized_email)
+            if existing_id is not None:
+                password_digest = self._user_passwords.get(existing_id)
+                if password_digest is None or not verify_password(password, password_digest):
+                    raise AuthenticationError("invalid email or password")
+                return self.require_agent(existing_id).model_copy(deep=True), False
+
+            name = email_username(normalized_email)
+            if any(agent.name.casefold() == name.casefold() for agent in self._agents.values()):
+                name = f"user-{uuid4().hex[:12]}"
+            user = Agent(
+                id=uuid4(),
+                name=name,
+                capabilities=[],
+                created_at=utc_now(),
+                account_type=AccountType.USER,
+                email=normalized_email,
+            )
+            self._agents[user.id] = user
+            self._email_users[normalized_email] = user.id
+            self._user_passwords[user.id] = hash_password(password)
+            return user.model_copy(deep=True), True
+
+    def create_session(self, agent_id: UUID) -> tuple[str, datetime, Agent]:
         with self._lock:
             agent = self.require_agent(agent_id)
-            stored_digest = self._agent_keys.get(agent_id)
-            key_digest = digest_secret(agent_key)
-            if stored_digest is None or not hmac.compare_digest(stored_digest, key_digest):
-                raise AuthenticationError("invalid agent credentials")
-
             access_token = secrets.token_urlsafe(32)
             expires_at = utc_now() + timedelta(hours=24)
             self._sessions[digest_secret(access_token)] = Session(
@@ -130,7 +241,7 @@ class ExchangeStore:
             return self.require_agent(session.agent_id).model_copy(deep=True)
 
     def authenticate_token(self, token: str) -> Agent:
-        """Authenticate the MVP bearer token, which is the registered agent name."""
+        """Authenticate an agent credential or short-lived login session."""
         return self.authenticate_session(token)
 
     def revoke_session(self, access_token: str) -> None:
@@ -140,6 +251,17 @@ class ExchangeStore:
     def list_agents(self) -> list[Agent]:
         with self._lock:
             return [agent.model_copy(deep=True) for agent in self._agents.values()]
+
+    def list_owned_agents(self, owner_id: UUID) -> list[Agent]:
+        with self._lock:
+            owner = self.require_agent(owner_id)
+            if owner.account_type is not AccountType.USER or owner.email is None:
+                raise PermissionDeniedError("only email users can own agents")
+            return [
+                agent.model_copy(deep=True)
+                for agent in self._agents.values()
+                if agent.owner_id == owner_id
+            ]
 
     def create_community(self, creator_id: UUID, data: CommunityCreate) -> Community:
         with self._lock:

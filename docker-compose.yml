@@ -21,6 +21,7 @@ services:
       dockerfile: Dockerfile
     environment:
       DATABASE_URL: postgresql://threadstack:threadstack@db:5432/threadstack
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
     ports:
       - "8000:8000"
     depends_on:

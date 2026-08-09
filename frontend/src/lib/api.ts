@@ -17,6 +17,9 @@ export interface Agent {
   created_at: string;
   reputation: number;
   status: "active" | "suspended";
+  account_type: "user" | "agent";
+  owner_id?: string | null;
+  email?: string | null;
 }
 
 export interface Community {
@@ -88,40 +91,34 @@ export interface PostCreate {
   parent_id?: string | null;
 }
 
-export interface AgentRegistration {
+export interface AgentCreate {
   name: string;
   description?: string;
   capabilities: string[];
 }
 
-export interface AuthRegisterResponse {
+export interface AgentRegistration {
   agent: Agent;
   token: string;
   agent_key: string;
   warning: string;
 }
 
-export interface AuthLoginResponse {
-  access_token: string;
-  token_type: "bearer";
-  expires_at: string;
-  agent: Agent;
+export interface EmailLoginResponse {
+  user: Agent;
+  first_login: boolean;
 }
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
-const ACCESS_TOKEN_KEY = "threadstack_access_token";
+const LEGACY_ACCESS_TOKEN_KEY = "threadstack_access_token";
 const AGENT_KEY = "threadstack_agent";
-
-function storedAccessToken(): string | null {
-  return localStorage.getItem(ACCESS_TOKEN_KEY);
-}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
+    credentials: "include",
     headers: {
       "content-type": "application/json",
-      ...(storedAccessToken() ? { authorization: `Bearer ${storedAccessToken()}` } : {}),
       ...init?.headers,
     },
   });
@@ -154,22 +151,32 @@ export function createCommunity(payload: CommunityCreate): Promise<Community> {
   });
 }
 
-export function registerAgent(payload: AgentRegistration): Promise<AuthRegisterResponse> {
-  return request<AuthRegisterResponse>("/auth/register", {
+export function getCurrentAgent(): Promise<Agent> {
+  return request<Agent>("/auth/me");
+}
+
+export function listOwnedAgents(): Promise<Agent[]> {
+  return request<Agent[]>("/auth/me/agents");
+}
+
+export function createAgent(payload: AgentCreate): Promise<AgentRegistration> {
+  return request<AgentRegistration>("/auth/me/agents", {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
-export function loginAgent(agentId: string, agentKey: string): Promise<AuthLoginResponse> {
-  return request<AuthLoginResponse>("/auth/login", {
+export function loginUser(email: string, password: string): Promise<EmailLoginResponse> {
+  return request<EmailLoginResponse>("/auth/login", {
     method: "POST",
-    body: JSON.stringify({ agent_id: agentId, agent_key: agentKey }),
+    body: JSON.stringify({ email, password }),
   });
 }
 
-export function getCurrentAgent(): Promise<Agent> {
-  return request<Agent>("/auth/me");
+export function recoverAgentToken(agentId: string): Promise<AgentRegistration> {
+  return request<AgentRegistration>(`/auth/me/agents/${agentId}/token`, {
+    method: "POST",
+  });
 }
 
 export async function logoutAgent(): Promise<void> {
@@ -180,18 +187,12 @@ export async function logoutAgent(): Promise<void> {
   }
 }
 
-export function saveSession(session: AuthLoginResponse): void {
-  localStorage.setItem(ACCESS_TOKEN_KEY, session.access_token);
-  localStorage.setItem(AGENT_KEY, JSON.stringify(session.agent));
-}
-
-export function saveAgentToken(agent: Agent, token: string): void {
-  localStorage.setItem(ACCESS_TOKEN_KEY, token);
+export function saveAgent(agent: Agent): void {
   localStorage.setItem(AGENT_KEY, JSON.stringify(agent));
 }
 
 export function clearSession(): void {
-  localStorage.removeItem(ACCESS_TOKEN_KEY);
+  localStorage.removeItem(LEGACY_ACCESS_TOKEN_KEY);
   localStorage.removeItem(AGENT_KEY);
 }
 

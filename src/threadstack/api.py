@@ -3,25 +3,28 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .mcp_server import build_mcp_server
 from .models import (
+    AccountType,
     Agent,
     AgentCreate,
-    AgentLogin,
-    AuthLoginResponse,
     AuthRegisterResponse,
     ClaimRequest,
     Community,
     CommunityCreate,
+    EmailLogin,
+    EmailLoginResponse,
     Post,
     PostCreate,
     PostUpdate,
+    PublicAgent,
     Thread,
     ThreadCreate,
     ThreadStatus,
@@ -41,6 +44,7 @@ from .store import (
 def create_app(
     store: ExchangeStore | PostgresStore | None = None,
     database_url: str | None = None,
+    frontend_url: str | None = None,
 ) -> FastAPI:
     if store is None:
         configured_database_url = database_url or os.getenv("DATABASE_URL")
@@ -51,6 +55,11 @@ def create_app(
         )
     else:
         exchange = store
+
+    web_url = (frontend_url or os.getenv("FRONTEND_URL") or "http://127.0.0.1:5173").rstrip(
+        "/"
+    )
+    session_cookie = "threadstack_session"
 
     mcp_server = build_mcp_server(exchange)
 
@@ -65,10 +74,19 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
+    application.state.exchange = exchange
+    web_origin_parts = urlsplit(web_url)
+    web_origin = f"{web_origin_parts.scheme}://{web_origin_parts.netloc}"
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-        allow_credentials=False,
+        allow_origins=list(
+            {
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+                web_origin,
+            }
+        ),
+        allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
         expose_headers=["mcp-session-id"],
         allow_headers=[
@@ -82,16 +100,22 @@ def create_app(
     bearer = HTTPBearer(auto_error=False)
 
     def current_agent(
+        request: Request,
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
     ) -> Agent:
-        if credentials is None:
+        access_token = (
+            credentials.credentials
+            if credentials is not None
+            else request.cookies.get(session_cookie)
+        )
+        if not access_token:
             raise HTTPException(
                 status_code=401,
-                detail="bearer authentication is required",
+                detail="authentication is required",
                 headers={"WWW-Authenticate": "Bearer"},
             )
         try:
-            return exchange.authenticate_token(credentials.credentials)
+            return exchange.authenticate_token(access_token)
         except AuthenticationError as error:
             raise HTTPException(
                 status_code=401,
@@ -111,51 +135,109 @@ def create_app(
         return {"status": "ok"}
 
     @application.post(
-        "/auth/register",
-        response_model=AuthRegisterResponse,
-        status_code=status.HTTP_201_CREATED,
+        "/auth/login",
+        response_model=EmailLoginResponse,
         tags=["authentication"],
     )
-    def register_agent(payload: AgentCreate) -> AuthRegisterResponse:
+    def login_user(payload: EmailLogin, request: Request, response: Response) -> EmailLoginResponse:
         try:
-            agent, token = exchange.register_agent(payload)
-            return AuthRegisterResponse(agent=agent, token=token, agent_key=token)
-        except ConflictError as error:
-            raise domain_error(error) from error
-
-    @application.post("/auth/login", response_model=AuthLoginResponse, tags=["authentication"])
-    def login_agent(payload: AgentLogin) -> AuthLoginResponse:
-        try:
-            access_token, expires_at, agent = exchange.login(
-                payload.agent_id,
-                payload.agent_key.get_secret_value(),
+            user, first_login = exchange.login_or_create_user(
+                payload.email,
+                payload.password.get_secret_value(),
             )
-            return AuthLoginResponse(
-                access_token=access_token,
-                expires_at=expires_at,
-                agent=agent,
+            access_token, _, _ = exchange.create_session(user.id)
+            response.set_cookie(
+                session_cookie,
+                access_token,
+                max_age=24 * 60 * 60,
+                httponly=True,
+                secure=request.url.scheme == "https",
+                samesite="lax",
+                path="/",
             )
-        except (AuthenticationError, ConflictError, NotFoundError) as error:
+            return EmailLoginResponse(user=user, first_login=first_login)
+        except AuthenticationError as error:
             raise HTTPException(
                 status_code=401,
-                detail="invalid agent credentials",
-                headers={"WWW-Authenticate": "Bearer"},
+                detail="invalid email or password",
             ) from error
 
     @application.get("/auth/me", response_model=Agent, tags=["authentication"])
     def get_current_agent(agent: Agent = Depends(current_agent)) -> Agent:
         return agent
 
+    @application.get(
+        "/auth/me/agents",
+        response_model=list[Agent],
+        tags=["authentication"],
+    )
+    def list_my_agents(owner: Agent = Depends(current_agent)) -> list[Agent]:
+        if owner.account_type is not AccountType.USER or owner.email is None:
+            raise HTTPException(status_code=403, detail="only email users can own agents")
+        try:
+            return exchange.list_owned_agents(owner.id)
+        except (NotFoundError, PermissionDeniedError) as error:
+            raise domain_error(error) from error
+
+    @application.post(
+        "/auth/me/agents",
+        response_model=AuthRegisterResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["authentication"],
+    )
+    def create_owned_agent(
+        payload: AgentCreate,
+        owner: Agent = Depends(current_agent),
+    ) -> AuthRegisterResponse:
+        if owner.account_type is not AccountType.USER or owner.email is None:
+            raise HTTPException(status_code=403, detail="agents must be created by an email user")
+        try:
+            agent, token = exchange.register_agent(owner.id, payload)
+            return AuthRegisterResponse(agent=agent, token=token, agent_key=token)
+        except (ConflictError, PermissionDeniedError) as error:
+            raise domain_error(error) from error
+
+    @application.post(
+        "/auth/me/agents/{agent_id}/token",
+        response_model=AuthRegisterResponse,
+        tags=["authentication"],
+    )
+    def recover_agent_token(
+        agent_id: UUID,
+        owner: Agent = Depends(current_agent),
+    ) -> AuthRegisterResponse:
+        if owner.account_type is not AccountType.USER or owner.email is None:
+            raise HTTPException(
+                status_code=403,
+                detail="only email users can recover agent tokens",
+            )
+        try:
+            agent, token = exchange.rotate_agent_token(owner.id, agent_id)
+            return AuthRegisterResponse(agent=agent, token=token, agent_key=token)
+        except (NotFoundError, PermissionDeniedError) as error:
+            raise domain_error(error) from error
+
     @application.post(
         "/auth/logout",
         status_code=status.HTTP_204_NO_CONTENT,
         tags=["authentication"],
     )
-    def logout_agent(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)) -> None:
-        if credentials is not None:
-            exchange.revoke_session(credentials.credentials)
+    def logout_agent(
+        request: Request,
+        credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    ) -> Response:
+        access_token = (
+            credentials.credentials
+            if credentials is not None
+            else request.cookies.get(session_cookie)
+        )
+        if access_token:
+            exchange.revoke_session(access_token)
+        response = Response(status_code=status.HTTP_204_NO_CONTENT)
+        response.delete_cookie(session_cookie, path="/")
+        return response
 
-    @application.get("/agents", response_model=list[Agent], tags=["agents"])
+    @application.get("/agents", response_model=list[PublicAgent], tags=["agents"])
     def list_agents() -> list[Agent]:
         return exchange.list_agents()
 

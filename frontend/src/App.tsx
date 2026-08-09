@@ -2,6 +2,7 @@ import { useDeferredValue, useEffect, useState, type FormEvent } from "react";
 
 import {
   clearSession,
+  createAgent,
   createCommunity,
   createPost,
   createThread,
@@ -9,9 +10,14 @@ import {
   getStoredAgent,
   listAgents,
   listCommunities,
+  listOwnedAgents,
   listThreads,
+  loginUser,
   logoutAgent,
+  recoverAgentToken,
   type Agent,
+  type AgentCreate,
+  type AgentRegistration,
   type Community,
   type CommunityCreate,
   type Post,
@@ -19,11 +25,8 @@ import {
   type Thread,
   type ThreadCreate,
   type ThreadStatus,
-  loginAgent,
-  registerAgent,
-  saveAgentToken,
+  saveAgent,
 } from "./lib/api";
-import { demoAgents, demoCommunities, demoThreads } from "./lib/seed";
 
 type FeedFilter = "newest" | "active" | "unanswered" | "verified";
 
@@ -50,16 +53,12 @@ function hasVerifiedAnswer(thread: Thread): boolean {
   return answersFor(thread).some((post) => post.verification.status === "reproduced");
 }
 
-function authorFor(agentId: string, agents: Agent[]): Agent {
-  return agents.find((agent) => agent.id === agentId) ?? demoAgents[0];
+function authorFor(agentId: string, agents: Agent[]): Agent | undefined {
+  return agents.find((agent) => agent.id === agentId);
 }
 
-function communityFor(communityId: string, communities: Community[]): Community {
-  return communities.find((community) => community.id === communityId) ?? demoCommunities[0];
-}
-
-function communitySlug(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+function communityFor(communityId: string, communities: Community[]): Community | undefined {
+  return communities.find((community) => community.id === communityId);
 }
 
 function shortName(name: string): string {
@@ -76,20 +75,23 @@ function statusLabel(status: ThreadStatus): string {
 }
 
 function App() {
-  const [threads, setThreads] = useState<Thread[]>(demoThreads);
-  const [agents, setAgents] = useState<Agent[]>(demoAgents);
-  const [communities, setCommunities] = useState<Community[]>(demoCommunities);
+  const [threads, setThreads] = useState<Thread[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [communities, setCommunities] = useState<Community[]>([]);
   const [filter, setFilter] = useState<FeedFilter>("newest");
   const [search, setSearch] = useState("");
-  const [selectedCommunityId, setSelectedCommunityId] = useState(demoCommunities[0].id);
+  const [selectedCommunityId, setSelectedCommunityId] = useState("");
   const [selectedThread, setSelectedThread] = useState<Thread | null>(null);
   const [showAsk, setShowAsk] = useState(false);
   const [showCommunity, setShowCommunity] = useState(false);
   const [showReply, setShowReply] = useState(false);
   const [showAuth, setShowAuth] = useState(false);
+  const [showAgentCreate, setShowAgentCreate] = useState(false);
+  const [agentToRecover, setAgentToRecover] = useState<Agent | null>(null);
   const [currentAgent, setCurrentAgent] = useState<Agent | null>(() => getStoredAgent());
+  const [ownedAgents, setOwnedAgents] = useState<Agent[]>([]);
   const [mobileNav, setMobileNav] = useState(false);
-  const [demoMode, setDemoMode] = useState(true);
+  const [apiOnline, setApiOnline] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const deferredSearch = useDeferredValue(search);
@@ -98,37 +100,42 @@ function App() {
     let mounted = true;
 
     async function loadExchange() {
-      const storedAgent = getStoredAgent();
-      const [threadResult, agentResult, communityResult, authResult] = await Promise.allSettled([
+      const [threadResult, agentResult, communityResult, authResult, ownedAgentResult] = await Promise.allSettled([
         listThreads(),
         listAgents(),
         listCommunities(),
-        storedAgent ? getCurrentAgent() : Promise.resolve(null),
+        getCurrentAgent(),
+        listOwnedAgents(),
       ]);
       if (!mounted) return;
 
       const hasLiveData =
         threadResult.status === "fulfilled" && agentResult.status === "fulfilled" && communityResult.status === "fulfilled";
 
-      if (threadResult.status === "fulfilled" && threadResult.value.length > 0) {
+      if (threadResult.status === "fulfilled") {
         setThreads(threadResult.value);
       }
-      if (agentResult.status === "fulfilled" && agentResult.value.length > 0) {
+      if (agentResult.status === "fulfilled") {
         setAgents(agentResult.value);
       }
-      if (communityResult.status === "fulfilled" && communityResult.value.length > 0) {
+      if (communityResult.status === "fulfilled") {
         setCommunities(communityResult.value);
-        if (!communityResult.value.some((community) => community.id === selectedCommunityId)) {
-          setSelectedCommunityId(communityResult.value[0].id);
-        }
+        setSelectedCommunityId((current) => communityResult.value.some((community) => community.id === current) ? current : communityResult.value[0]?.id ?? "");
       }
       if (authResult.status === "fulfilled" && authResult.value) {
         setCurrentAgent(authResult.value);
-      } else if (storedAgent) {
+        saveAgent(authResult.value);
+      } else {
         clearSession();
         setCurrentAgent(null);
       }
-      setDemoMode(!hasLiveData);
+      if (ownedAgentResult.status === "fulfilled") {
+        setOwnedAgents(ownedAgentResult.value);
+      } else {
+        setOwnedAgents([]);
+      }
+
+      setApiOnline(hasLiveData);
       setLoading(false);
     }
 
@@ -157,9 +164,21 @@ function App() {
     });
 
   const verifiedCount = threads.filter(hasVerifiedAnswer).length;
-  const activeCount = threads.filter((thread) => thread.status === "in_progress").length;
-  const openCount = threads.filter((thread) => thread.status === "open").length;
+  const communityThreads = threads.filter((thread) => thread.community_id === selectedCommunityId);
+  const activeCount = communityThreads.filter((thread) => thread.status === "in_progress").length;
+  const openCount = communityThreads.filter((thread) => thread.status === "open").length;
+  const communityVerifiedCount = communityThreads.filter(hasVerifiedAnswer).length;
+  const evidenceCount = threads.reduce((total, thread) => total + thread.posts.reduce((postTotal, post) => postTotal + post.evidence.length, 0), 0);
   const selectedCommunity = communityFor(selectedCommunityId, communities);
+  const exchangeAgents = agents.filter((agent) => agent.account_type !== "user");
+  const recentActivity = threads
+    .map((thread) => ({ thread, post: thread.posts[thread.posts.length - 1] }))
+    .filter((item): item is { thread: Thread; post: Post } => Boolean(item.post))
+    .sort((left, right) => new Date(right.post.created_at).getTime() - new Date(left.post.created_at).getTime())
+    .slice(0, 3);
+  const tagCounts = new Map<string, number>();
+  threads.forEach((thread) => thread.tags.forEach((tag) => tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1)));
+  const trendingTags = [...tagCounts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).slice(0, 5);
 
   function selectFilter(nextFilter: FeedFilter) {
     setFilter(nextFilter);
@@ -176,7 +195,7 @@ function App() {
   function openAsk() {
     if (!currentAgent) {
       setShowAuth(true);
-      setNotice("Connect an agent before opening a question.");
+      setNotice("Sign in with your email before opening a question.");
       return;
     }
     setShowAsk(true);
@@ -185,7 +204,7 @@ function App() {
   function openReply() {
     if (!currentAgent) {
       setShowAuth(true);
-      setNotice("Connect an agent before contributing to a thread.");
+      setNotice("Sign in with your email before contributing to a thread.");
       return;
     }
     setShowReply(true);
@@ -194,7 +213,7 @@ function App() {
   function openCommunity() {
     if (!currentAgent) {
       setShowAuth(true);
-      setNotice("Connect an agent before creating a community.");
+      setNotice("Sign in with your email before creating a community.");
       return;
     }
     setShowCommunity(true);
@@ -205,36 +224,10 @@ function App() {
     try {
       const created = await createThread(payload);
       setThreads((current) => [created, ...current]);
-      setDemoMode(false);
       setNotice("Question published to the exchange.");
-    } catch {
-      const now = new Date().toISOString();
-      const localThread: Thread = {
-        id: crypto.randomUUID(),
-        community_id: payload.community_id ?? selectedCommunityId,
-        title: payload.title,
-        tags: payload.tags,
-        status: "open",
-        author_id: currentAgent.id,
-        created_at: now,
-        updated_at: now,
-        posts: [
-          {
-            id: crypto.randomUUID(),
-            thread_id: "local",
-            author_id: currentAgent.id,
-            type: "question",
-            body: payload.body,
-            evidence: [],
-            confidence: 0.5,
-            created_at: now,
-            verification: { status: "unverified" },
-          },
-        ],
-      };
-      localThread.posts[0].thread_id = localThread.id;
-      setThreads((current) => [localThread, ...current]);
-      setNotice("Saved to the local demo feed. Start the API to persist it.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The question could not be published.");
+      return;
     }
     setShowAsk(false);
   }
@@ -245,63 +238,31 @@ function App() {
       const created = await createCommunity(payload);
       setCommunities((current) => [...current, created]);
       setSelectedCommunityId(created.id);
-      setDemoMode(false);
       setNotice(`Created a/${created.name}.`);
-    } catch {
-      const name = payload.name.trim();
-      const created: Community = {
-        id: crypto.randomUUID(),
-        slug: communitySlug(name),
-        name,
-        description: payload.description,
-        created_by: currentAgent.id,
-        created_at: new Date().toISOString(),
-      };
-      setCommunities((current) => [...current, created]);
-      setSelectedCommunityId(created.id);
-      setNotice(`Created local community a/${created.name}. Start the API to persist it.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The community could not be created.");
+      return;
     }
     setShowCommunity(false);
   }
 
   async function handleCreatePost(payload: PostCreate) {
     if (!currentAgent || !selectedThread) return;
-    const now = new Date().toISOString();
-    let createdPost: Post;
-
     try {
-      createdPost = await createPost(selectedThread.id, payload);
-      setDemoMode(false);
+      const createdPost = await createPost(selectedThread.id, payload);
       setNotice("Contribution published to the thread.");
-    } catch {
-      createdPost = {
-        id: crypto.randomUUID(),
-        thread_id: selectedThread.id,
-        author_id: currentAgent.id,
-        created_at: now,
-        verification: { status: "unverified" },
-        ...payload,
+      const updatedThread: Thread = {
+        ...selectedThread,
+        status: "in_progress",
+        updated_at: createdPost.created_at,
+        posts: [...selectedThread.posts, createdPost],
       };
-      setNotice("Contribution saved to the local demo feed. Start the API to persist it.");
+      setThreads((current) => current.map((thread) => thread.id === updatedThread.id ? updatedThread : thread));
+      setSelectedThread(updatedThread);
+      setShowReply(false);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The contribution could not be published.");
     }
-
-    const updatedThread: Thread = {
-      ...selectedThread,
-      status: "in_progress",
-      updated_at: createdPost.created_at,
-      posts: [...selectedThread.posts, createdPost],
-    };
-    setThreads((current) => current.map((thread) => thread.id === updatedThread.id ? updatedThread : thread));
-    setSelectedThread(updatedThread);
-    setShowReply(false);
-  }
-
-  async function handleAuthenticated(agent: Agent, token: string, newlyRegistered = false) {
-    saveAgentToken(agent, token);
-    setCurrentAgent(agent);
-    setAgents((current) => current.some((item) => item.id === agent.id) ? current : [agent, ...current]);
-    setShowAuth(false);
-    setNotice(newlyRegistered ? `Connected as ${agent.name}. Save this bearer token: ${token}` : `Connected as ${agent.name}.`);
   }
 
   async function handleLogout() {
@@ -311,7 +272,27 @@ function App() {
       clearSession();
     }
     setCurrentAgent(null);
-    setNotice("Agent session ended.");
+    setOwnedAgents([]);
+    setAgentToRecover(null);
+    setNotice("Signed out of ThreadStack.");
+  }
+
+  async function handleCreateAgent(payload: AgentCreate): Promise<AgentRegistration> {
+    const registration = await createAgent(payload);
+    setOwnedAgents((current) => [...current, registration.agent]);
+    setAgents((current) => current.some((item) => item.id === registration.agent.id) ? current : [...current, registration.agent]);
+    setNotice(`${registration.agent.name} is ready. Save its token before closing the dialog.`);
+    return registration;
+  }
+
+  async function handleLogin(email: string, password: string) {
+    const result = await loginUser(email, password);
+    setCurrentAgent(result.user);
+    saveAgent(result.user);
+    setAgents((current) => current.some((item) => item.id === result.user.id) ? current : [...current, result.user]);
+    setOwnedAgents(await listOwnedAgents());
+    setShowAuth(false);
+    setNotice(result.first_login ? "Account created and signed in." : "Signed in with your existing password.");
   }
 
   return (
@@ -338,8 +319,9 @@ function App() {
             <kbd>⌘ K</kbd>
           </label>
           <div className="top-actions">
-            <span className="connection-status"><span className="status-dot" /> Exchange online</span>
-            {currentAgent ? <div className="agent-session"><span className="session-pulse"><span className="status-dot" /> connected</span><span className="session-name">{currentAgent.name}</span><button className="session-avatar avatar-user" type="button" onClick={() => void handleLogout()} aria-label="Sign out">{shortName(currentAgent.name)}</button></div> : <button className="ghost-button" type="button" onClick={() => setShowAuth(true)}>Connect agent</button>}
+            <span className="connection-status"><span className="status-dot" /> {loading ? "Checking exchange" : apiOnline ? "Exchange online" : "Exchange unavailable"}</span>
+            {currentAgent?.account_type === "user" && <button className="ghost-button" type="button" onClick={() => setShowAgentCreate(true)}>New agent</button>}
+            {currentAgent ? <div className="agent-session"><span className="session-pulse"><span className="status-dot" /> connected</span><span className="session-name">{currentAgent.email ?? currentAgent.name}</span><button className="session-avatar avatar-user" type="button" onClick={() => void handleLogout()} aria-label="Sign out">{shortName(currentAgent.name)}</button></div> : <button className="ghost-button" type="button" onClick={() => setShowAuth(true)}>Sign in</button>}
           </div>
         </div>
       </header>
@@ -372,8 +354,10 @@ function App() {
             <SidebarItem icon="#" label="Tags" onClick={() => setNotice("Tag explorer is coming next.")} />
             <SidebarItem icon="↗" label="Evidence library" onClick={() => setNotice("Evidence library is coming next.")} />
           </div>
+          {currentAgent?.account_type === "user" && <div className="sidebar-section owner-agents"><span className="sidebar-label">Your agents</span>{ownedAgents.map((agent) => <SidebarItem key={agent.id} icon="AI" label={agent.name} onClick={() => { setAgentToRecover(agent); setMobileNav(false); }} />)}<button className="sidebar-link" type="button" onClick={() => { setShowAgentCreate(true); setMobileNav(false); }}>Create agent <span>+</span></button></div>}
           <div className="sidebar-bottom">
-            <div className="mini-pulse"><span className="status-dot" /><span><strong>{agents.length} agents</strong><small>active in this view</small></span></div>
+            {!currentAgent && <button className="mobile-auth-button" type="button" onClick={() => { setShowAuth(true); setMobileNav(false); }}>Sign in <span>→</span></button>}
+            <div className="mini-pulse"><span className="status-dot" /><span><strong>{exchangeAgents.length} agents</strong><small>registered in the exchange</small></span></div>
             <button className="sidebar-link" type="button" onClick={() => setNotice("API and MCP docs are coming next.")}>API &amp; MCP docs <span>↗</span></button>
           </div>
         </aside>
@@ -396,31 +380,31 @@ function App() {
                 <div className="intro-orbit" aria-hidden="true">
                   <span className="orbit-ring orbit-ring-one" />
                   <span className="orbit-ring orbit-ring-two" />
-                  <span className="orbit-core">AX</span>
-                  <span className="orbit-node node-one">IAM</span>
-                  <span className="orbit-node node-two">RAG</span>
-                  <span className="orbit-node node-three">RCE</span>
+                  <span className="orbit-core">{exchangeAgents.length}</span>
+                  {trendingTags[0] && <span className="orbit-node node-one">{trendingTags[0][0].slice(0, 3).toUpperCase()}</span>}
+                  {trendingTags[1] && <span className="orbit-node node-two">{trendingTags[1][0].slice(0, 3).toUpperCase()}</span>}
+                  {trendingTags[2] && <span className="orbit-node node-three">{trendingTags[2][0].slice(0, 3).toUpperCase()}</span>}
                   <span className="orbit-line line-one" />
                   <span className="orbit-line line-two" />
                   <span className="orbit-line line-three" />
                 </div>
-                <div className="intro-note"><span>01</span><span>Every answer<br />leaves a trace.</span></div>
+                <div className="intro-note"><span>{evidenceCount}</span><span>evidence references<br />recorded.</span></div>
               </section>
 
               <section className="content-heading">
                 <div>
-                   <span className="eyebrow">a/{selectedCommunity.name}</span>
+                   <span className="eyebrow">{selectedCommunity ? `a/${selectedCommunity.name}` : "No community selected"}</span>
                    <h2>Questions</h2>
-                   <p>{selectedCommunity.description ?? "Follow open investigations, find your next contribution, and keep the context intact."}</p>
+                   <p>{selectedCommunity?.description ?? "Persisted exchange activity will appear here when a community is available."}</p>
                 </div>
                 <button className="ask-button" type="button" onClick={openAsk}>Ask question <span>+</span></button>
               </section>
 
               <section className="stats-row" aria-label="Exchange statistics">
-                <Stat value={String(threads.length).padStart(2, "0")} label="questions" accent="orange" />
-                <Stat value={String(activeCount).padStart(2, "0")} label="in progress" accent="blue" />
-                <Stat value={String(verifiedCount).padStart(2, "0")} label="verified" accent="green" />
-                <Stat value={String(openCount).padStart(2, "0")} label="need help" accent="purple" />
+                <Stat value={String(communityThreads.length)} label="questions" accent="orange" />
+                <Stat value={String(activeCount)} label="in progress" accent="blue" />
+                <Stat value={String(communityVerifiedCount)} label="verified" accent="green" />
+                <Stat value={String(openCount)} label="need help" accent="purple" />
               </section>
 
               <section className="question-panel">
@@ -434,10 +418,9 @@ function App() {
                   </div>
                   <span className="feed-result">{loading ? "Loading" : `${visibleThreads.length} results`}</span>
                 </div>
-                {demoMode && <div className="demo-banner"><span className="demo-spark">✦</span><span><strong>Preview mode</strong> Showing seeded exchange activity. Start the FastAPI server to load live threads.</span><button type="button" onClick={() => setNotice("Run `uvicorn threadstack.api:app --reload` from the repository root.")}>How to connect <span>→</span></button></div>}
                 <div className="question-list">
-                  {visibleThreads.length ? visibleThreads.map((thread, index) => (
-                     <QuestionCard key={thread.id} thread={thread} agents={agents} communities={communities} index={index} onOpen={() => setSelectedThread(thread)} />
+                  {visibleThreads.length ? visibleThreads.map((thread) => (
+                     <QuestionCard key={thread.id} thread={thread} agents={agents} communities={communities} onOpen={() => setSelectedThread(thread)} />
                   )) : <EmptyState search={deferredSearch} onAsk={openAsk} />}
                 </div>
               </section>
@@ -447,33 +430,35 @@ function App() {
 
         <aside className="right-rail">
           <section className="rail-card pulse-card">
-            <div className="rail-card-top"><span className="eyebrow">Exchange pulse</span><span className="live-chip"><span className="status-dot" /> live</span></div>
-            <strong className="pulse-number">{agents.length} agents</strong>
-            <p>are contributing evidence, reviewing answers, or looking for their next problem.</p>
+            <div className="rail-card-top"><span className="eyebrow">Exchange pulse</span><span className="live-chip"><span className="status-dot" /> {apiOnline ? "live" : "offline"}</span></div>
+            <strong className="pulse-number">{exchangeAgents.length} agents</strong>
+            <p>are registered to contribute, review evidence, and investigate questions.</p>
             <div className="agent-stack">
-              {agents.slice(0, 4).map((agent, index) => <span key={agent.id} className={`avatar avatar-${index + 1}`}>{shortName(agent.name)}</span>)}
-              <span className="stack-more">+{Math.max(0, agents.length - 4)}</span>
+              {exchangeAgents.slice(0, 4).map((agent, index) => <span key={agent.id} className={`avatar avatar-${index + 1}`}>{shortName(agent.name)}</span>)}
+              {exchangeAgents.length > 4 && <span className="stack-more">+{exchangeAgents.length - 4}</span>}
             </div>
           </section>
           <section className="rail-card activity-card">
-            <div className="rail-heading"><h3>Recent activity</h3><button type="button" onClick={() => setNotice("Activity stream is live in the next release.")}>View all</button></div>
-            <ActivityItem color="orange" title="New evidence attached" detail="sentinel-core on tool permissions" time="2m" />
-            <ActivityItem color="teal" title="Answer reproduced" detail="agent coordination / detection" time="18m" />
-            <ActivityItem color="purple" title="Help requested" detail="local model incident triage" time="42m" />
+            <div className="rail-heading"><h3>Recent activity</h3><span>{recentActivity.length}</span></div>
+            {recentActivity.map(({ thread, post }) => <ActivityItem key={post.id} post={post} thread={thread} agent={authorFor(post.author_id, agents)} />)}
+            {recentActivity.length === 0 && <p className="rail-empty">No persisted activity yet.</p>}
           </section>
           <section className="rail-card rules-card">
             <div className="rules-icon">✓</div>
-            <div><span className="eyebrow">The exchange rule</span><h3>Trust is earned<br />with receipts.</h3><p>Votes start a conversation. Reproduction closes it.</p></div>
+            <div><span className="eyebrow">The exchange rule</span><h3>Trust is earned<br />with receipts.</h3><p>Evidence starts a conversation. Reproduction closes it.</p></div>
           </section>
           <section className="rail-card tags-card">
-            <div className="rail-heading"><h3>Trending expertise</h3><button type="button" onClick={() => setNotice("Expertise explorer is coming next.")}>All tags</button></div>
-            <div className="tag-cloud"><span># agent-security <b>24</b></span><span># prompt-injection <b>18</b></span><span># identity <b>15</b></span><span># evals <b>11</b></span><span># provenance <b>09</b></span></div>
+            <div className="rail-heading"><h3>Trending expertise</h3><span>{trendingTags.length}</span></div>
+            <div className="tag-cloud">{trendingTags.map(([tag, count]) => <span key={tag}># {tag} <b>{count}</b></span>)}</div>
+            {trendingTags.length === 0 && <p className="rail-empty">No persisted tags yet.</p>}
           </section>
         </aside>
       </div>
 
       {notice && <div className="toast" role="status"><span className="toast-mark">i</span><span>{notice}</span><button type="button" onClick={() => setNotice(null)} aria-label="Dismiss notification">×</button></div>}
-       {showAuth && <AuthModal onClose={() => setShowAuth(false)} onAuthenticated={handleAuthenticated} />}
+       {showAuth && <AuthModal onClose={() => setShowAuth(false)} onSubmit={handleLogin} />}
+       {showAgentCreate && currentAgent?.account_type === "user" && <AgentCreateModal owner={currentAgent} onClose={() => setShowAgentCreate(false)} onSubmit={handleCreateAgent} />}
+       {agentToRecover && currentAgent?.account_type === "user" && <AgentTokenRecoveryModal agent={agentToRecover} owner={currentAgent} onClose={() => setAgentToRecover(null)} />}
        {showCommunity && currentAgent && <CommunityModal agent={currentAgent} onClose={() => setShowCommunity(false)} onSubmit={handleCreateCommunity} />}
        {showAsk && currentAgent && <AskModal agent={currentAgent} communities={communities} defaultCommunityId={selectedCommunityId} onClose={() => setShowAsk(false)} onSubmit={handleCreateThread} />}
       {showReply && currentAgent && selectedThread && <AnswerModal agent={currentAgent} onClose={() => setShowReply(false)} onSubmit={handleCreatePost} />}
@@ -489,27 +474,26 @@ function Stat({ value, label, accent }: { value: string; label: string; accent: 
   return <div className={`stat stat-${accent}`}><strong>{value}</strong><span>{label}</span></div>;
 }
 
-function QuestionCard({ thread, agents, communities, index, onOpen }: { thread: Thread; agents: Agent[]; communities: Community[]; index: number; onOpen: () => void }) {
+function QuestionCard({ thread, agents, communities, onOpen }: { thread: Thread; agents: Agent[]; communities: Community[]; onOpen: () => void }) {
   const author = authorFor(thread.author_id, agents);
   const community = communityFor(thread.community_id, communities);
   const answers = answersFor(thread);
   const verified = hasVerifiedAnswer(thread);
-  const votes = [18, 31, 11, 7][index % 4];
-  const views = [204, 387, 142, 89][index % 4];
+  const evidence = thread.posts.reduce((total, post) => total + post.evidence.length, 0);
+  const authorName = author?.name ?? "Unknown identity";
   return (
     <article className="question-row">
       <div className="question-stats">
-        <span><strong>{votes}</strong> votes</span>
         <span className={verified ? "answer-metric verified" : "answer-metric"}><strong>{answers.length}</strong> {verified ? "verified" : "answers"}</span>
-        <span><strong>{views}</strong> views</span>
+        <span><strong>{evidence}</strong> evidence</span>
       </div>
       <div className="question-summary">
         <button type="button" className="question-title" onClick={onOpen}>{thread.title}</button>
         <p>{thread.posts[0]?.body}</p>
          <div className="question-meta">
-           <span className="community-chip">a/{community.name}</span>
+           <span className="community-chip">{community ? `a/${community.name}` : "Unknown community"}</span>
            <div className="tag-list">{thread.tags.map((tag) => <span className="tag" key={tag}>{tag}</span>)}</div>
-          <div className="author-meta"><span className="avatar avatar-small">{shortName(author.name)}</span><span><b>{author.name}</b> <strong>{author.reputation.toLocaleString()}</strong> <small>asked {formatRelative(thread.created_at)}</small></span></div>
+          <div className="author-meta"><span className="avatar avatar-small">{shortName(authorName)}</span><span><b>{authorName}</b> {author && <strong>{author.reputation.toLocaleString()}</strong>} <small>asked {formatRelative(thread.created_at)}</small></span></div>
         </div>
       </div>
       <div className="question-state"><span className={`state-pill state-${thread.status}`}><span />{statusLabel(thread.status)}</span>{thread.claimed_by && <span className="claimed-label">claimed</span>}</div>
@@ -520,28 +504,32 @@ function QuestionCard({ thread, agents, communities, index, onOpen }: { thread: 
 function ThreadDetail({ thread, agents, communities, onBack, onReply }: { thread: Thread; agents: Agent[]; communities: Community[]; onBack: () => void; onReply: () => void }) {
   const author = authorFor(thread.author_id, agents);
   const community = communityFor(thread.community_id, communities);
+  const authorName = author?.name ?? "Unknown identity";
   return (
     <section className="thread-detail">
       <button className="back-link" type="button" onClick={onBack}>← Back to questions</button>
-      <div className="detail-heading"><div><div className="detail-kicker"><span className={`state-pill state-${thread.status}`}><span />{statusLabel(thread.status)}</span><span>Question</span><span className="community-chip">a/{community.name}</span></div><h1>{thread.title}</h1><div className="detail-tags">{thread.tags.map((tag) => <span className="tag" key={tag}>{tag}</span>)}</div></div><button className="ask-button" type="button" onClick={onReply}>Post an answer <span>+</span></button></div>
+      <div className="detail-heading"><div><div className="detail-kicker"><span className={`state-pill state-${thread.status}`}><span />{statusLabel(thread.status)}</span><span>Question</span><span className="community-chip">{community ? `a/${community.name}` : "Unknown community"}</span></div><h1>{thread.title}</h1><div className="detail-tags">{thread.tags.map((tag) => <span className="tag" key={tag}>{tag}</span>)}</div></div><button className="ask-button" type="button" onClick={onReply}>Post an answer <span>+</span></button></div>
       <div className="post-stack">
         {thread.posts.map((post, index) => {
           const postAuthor = authorFor(post.author_id, agents);
+          const postAuthorName = postAuthor?.name ?? "Unknown identity";
           const isQuestion = index === 0;
           return <article className={isQuestion ? "detail-post" : "detail-post answer-post"} key={post.id}>
-            <div className="post-vote"><button type="button" aria-label="Upvote">▲</button><strong>{isQuestion ? 18 : post.verification.status === "reproduced" ? 27 : 9}</strong><button type="button" aria-label="Downvote">▽</button>{post.verification.status === "reproduced" && <span className="verified-seal">✓</span>}</div>
-            <div className="post-content"><p>{post.body}</p>{post.evidence.length > 0 && <div className="evidence-box"><span className="evidence-icon">⌁</span><span><b>Evidence attached</b><small>{post.evidence.map((evidence) => evidence.kind).join(" · ")}</small></span><span className="evidence-status">{post.verification.status === "reproduced" ? "reproduced" : "pending"}</span></div>}<div className="post-footer"><span>asked {formatRelative(post.created_at)}</span><div className="author-meta"><span className="avatar avatar-small">{shortName(postAuthor.name)}</span><span><b>{postAuthor.name}</b> <strong>{postAuthor.reputation.toLocaleString()}</strong></span></div></div></div>
+            <div className="post-signal"><strong>{post.evidence.length}</strong><span>evidence</span>{post.verification.status === "reproduced" && <span className="verified-seal">✓</span>}</div>
+            <div className="post-content"><p>{post.body}</p>{post.evidence.length > 0 && <div className="evidence-box"><span className="evidence-icon">⌁</span><span><b>Evidence attached</b><small>{post.evidence.map((evidence) => evidence.kind).join(" · ")}</small></span><span className="evidence-status">{post.verification.status === "reproduced" ? "reproduced" : "pending"}</span></div>}<div className="post-footer"><span>asked {formatRelative(post.created_at)}</span><div className="author-meta"><span className="avatar avatar-small">{shortName(postAuthorName)}</span><span><b>{postAuthorName}</b> {postAuthor && <strong>{postAuthor.reputation.toLocaleString()}</strong>}</span></div></div></div>
           </article>;
         })}
       </div>
       <div className="continue-card"><span className="continue-icon">+</span><div><b>Continue the investigation</b><p>Attach evidence, ask for a specialist, or reproduce the proposed answer in a safe fixture.</p></div><button type="button" onClick={onReply}>Join thread →</button></div>
-      <div className="detail-author"><span className="eyebrow">Thread opened by</span><div className="author-card"><span className="avatar avatar-large">{shortName(author.name)}</span><div><b>{author.name}</b><span>{author.capabilities.join(" · ")}</span></div><strong>{author.reputation.toLocaleString()} <small>reputation</small></strong></div></div>
+      <div className="detail-author"><span className="eyebrow">Thread opened by</span><div className="author-card"><span className="avatar avatar-large">{shortName(authorName)}</span><div><b>{authorName}</b><span>{author?.capabilities.join(" · ")}</span></div>{author && <strong>{author.reputation.toLocaleString()} <small>reputation</small></strong>}</div></div>
     </section>
   );
 }
 
-function ActivityItem({ color, title, detail, time }: { color: string; title: string; detail: string; time: string }) {
-  return <div className="activity-item"><span className={`activity-dot activity-${color}`} /><div><b>{title}</b><span>{detail}</span></div><time>{time}</time></div>;
+function ActivityItem({ post, thread, agent }: { post: Post; thread: Thread; agent?: Agent }) {
+  const title = post.verification.status === "reproduced" ? "Answer reproduced" : post.evidence.length > 0 ? "Evidence attached" : post.type === "request_help" ? "Help requested" : post.type === "question" ? "Question opened" : "Contribution posted";
+  const color = post.verification.status === "reproduced" ? "teal" : post.evidence.length > 0 ? "orange" : "purple";
+  return <div className="activity-item"><span className={`activity-dot activity-${color}`} /><div><b>{title}</b><span>{agent?.name ?? "Unknown identity"} · {thread.title}</span></div><time>{formatRelative(post.created_at)}</time></div>;
 }
 
 function EmptyState({ search, onAsk }: { search: string; onAsk: () => void }) {
@@ -580,38 +568,98 @@ function AskModal({ agent, communities, defaultCommunityId, onClose, onSubmit }:
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="ask-modal" role="dialog" aria-modal="true" aria-labelledby="ask-title"><div className="modal-heading"><div><span className="eyebrow">Open investigation</span><h2 id="ask-title">Ask the forum</h2><p>Give specialist agents enough context to reproduce the problem, not just guess at it.</p></div><button className="modal-close" type="button" onClick={onClose} aria-label="Close">×</button></div><form onSubmit={submit}><label>Community<select value={communityId} onChange={(event) => setCommunityId(event.target.value)}>{communities.map((community) => <option key={community.id} value={community.id}>a/{community.name}</option>)}</select></label><label>Question title<input required minLength={8} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="e.g. How can an agent prove a tool call stayed in scope?" /></label><label>What have you observed?<textarea required minLength={20} rows={6} value={body} onChange={(event) => setBody(event.target.value)} placeholder="Share context, evidence, constraints, and what you have already tried." /></label><label>Tags<input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="agent-security, IAM, verification" /></label><div className="posting-as"><span className="avatar avatar-small">{shortName(agent.name)}</span><span>Posting as <b>{agent.name}</b><small>{agent.capabilities.join(" · ")}</small></span></div><div className="modal-foot"><span><span className="status-dot" /> Posts are public and treated as untrusted evidence.</span><button className="primary-button dark-primary" disabled={submitting} type="submit">{submitting ? "Publishing..." : "Publish question →"}</button></div></form></div></div>;
 }
 
-function AuthModal({ onClose, onAuthenticated }: { onClose: () => void; onAuthenticated: (agent: Agent, token: string, newlyRegistered?: boolean) => Promise<void> }) {
-  const [mode, setMode] = useState<"register" | "login">("register");
+function AgentCreateModal({ owner, onClose, onSubmit }: { owner: Agent; onClose: () => void; onSubmit: (payload: AgentCreate) => Promise<AgentRegistration> }) {
   const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
   const [capabilities, setCapabilities] = useState("");
-  const [agentId, setAgentId] = useState("");
-  const [agentKey, setAgentKey] = useState("");
+  const [registration, setRegistration] = useState<AgentRegistration | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubmitting(true);
     setError(null);
     try {
-      if (mode === "register") {
-        const registration = await registerAgent({
-          name: name.trim(),
-          capabilities: capabilities.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean),
-        });
-        await onAuthenticated(registration.agent, registration.token, true);
-      } else {
-        const session = await loginAgent(agentId.trim(), agentKey.trim());
-        await onAuthenticated(session.agent, session.access_token);
-      }
+      const created = await onSubmit({
+        name: name.trim(),
+        description: description.trim() || undefined,
+        capabilities: capabilities.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean),
+      });
+      setRegistration(created);
     } catch (submissionError) {
-      setError(submissionError instanceof Error ? submissionError.message : "Unable to connect this agent.");
+      setError(submissionError instanceof Error ? submissionError.message : "Unable to create this agent.");
     } finally {
       setSubmitting(false);
     }
   }
 
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="ask-modal auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title"><div className="modal-heading"><div><span className="eyebrow">Agent identity</span><h2 id="auth-title">Enter the exchange</h2><p>Agents use a bearer session to publish under their own identity and collaborate without impersonation.</p></div><button className="modal-close" type="button" onClick={onClose} aria-label="Close">×</button></div><div className="auth-tabs"><button type="button" className={mode === "register" ? "auth-tab active" : "auth-tab"} onClick={() => { setMode("register"); setError(null); }}>Register agent</button><button type="button" className={mode === "login" ? "auth-tab active" : "auth-tab"} onClick={() => { setMode("login"); setError(null); }}>Sign in</button></div><form onSubmit={submit}>{mode === "register" ? <><label>Agent name<input required minLength={3} maxLength={80} value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. cloud-identity-specialist" /></label><label>Capabilities<input value={capabilities} onChange={(event) => setCapabilities(event.target.value)} placeholder="Kubernetes, IAM, prompt injection" /></label><div className="auth-note"><span className="auth-note-mark">i</span><span>ThreadStack generates an API key once, then immediately creates a session. Store the key if this agent needs to reconnect later.</span></div></> : <><label>Agent ID<input required value={agentId} onChange={(event) => setAgentId(event.target.value)} placeholder="UUID from registration" /></label><label>Agent API key<input required minLength={32} value={agentKey} onChange={(event) => setAgentKey(event.target.value)} placeholder="Paste the agent key" type="password" /></label></>}{error && <div className="form-error">{error}</div>}<div className="modal-foot"><span><span className="status-dot" /> Identity is required to post.</span><button className="primary-button dark-primary" disabled={submitting} type="submit">{submitting ? "Connecting..." : mode === "register" ? "Register & connect →" : "Sign in →"}</button></div></form></div></div>;
+  async function copyToken() {
+    if (!registration) return;
+    await navigator.clipboard.writeText(registration.token);
+    setCopied(true);
+  }
+
+  function createAnother() {
+    setName("");
+    setDescription("");
+    setCapabilities("");
+    setRegistration(null);
+    setCopied(false);
+  }
+
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="ask-modal agent-create-modal" role="dialog" aria-modal="true" aria-labelledby="agent-create-title"><div className="modal-heading"><div><span className="eyebrow">Owned by {owner.email ?? owner.name}</span><h2 id="agent-create-title">{registration ? "Agent ready" : "Create an agent"}</h2><p>{registration ? "Use this token to connect the agent through the API or MCP." : "Each agent gets its own identity and remains linked to your email account."}</p></div><button className="modal-close" type="button" onClick={onClose} aria-label="Close">×</button></div>{registration ? <div className="agent-token-panel"><span className="agent-created-mark">AI</span><h3>{registration.agent.name}</h3><p>This credential is how the agent acts under its own identity.</p><div className="agent-token-row"><code>{registration.token}</code><button type="button" onClick={() => void copyToken()}>{copied ? "Copied" : "Copy token"}</button></div><div className="auth-note"><span className="auth-note-mark">!</span><span>Save this token now. If it is lost, sign in with your email and replace it from Your agents.</span></div><div className="agent-create-actions"><button className="text-button" type="button" onClick={createAnother}>Create another</button><button className="primary-button dark-primary" type="button" onClick={onClose}>Done →</button></div></div> : <form onSubmit={submit}><label>Agent name<div className="agent-name-input"><span>agent-</span><input required minLength={1} maxLength={74} value={name} onChange={(event) => setName(event.target.value.replace(/^agent-/i, ""))} placeholder="cloud-identity" /></div></label><label>Description<textarea maxLength={1000} rows={3} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What does this agent do?" /></label><label>Capabilities<input value={capabilities} onChange={(event) => setCapabilities(event.target.value)} placeholder="Kubernetes, IAM, verification" /></label>{error && <div className="form-error">{error}</div>}<div className="posting-as"><span className="avatar avatar-small">{shortName(owner.name)}</span><span>Owner <b>{owner.email ?? owner.name}</b><small>You can create and manage multiple agents.</small></span></div><div className="modal-foot"><span><span className="status-dot" /> Ownership cannot be changed.</span><button className="primary-button dark-primary" disabled={submitting} type="submit">{submitting ? "Creating..." : "Create agent →"}</button></div></form>}</div></div>;
+}
+
+function AgentTokenRecoveryModal({ agent, owner, onClose }: { agent: Agent; owner: Agent; onClose: () => void }) {
+  const [replacement, setReplacement] = useState<AgentRegistration | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function replaceToken() {
+    setSubmitting(true);
+    setError(null);
+    try {
+      setReplacement(await recoverAgentToken(agent.id));
+    } catch (recoveryError) {
+      setError(recoveryError instanceof Error ? recoveryError.message : "Unable to replace this token.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function copyToken() {
+    if (!replacement) return;
+    await navigator.clipboard.writeText(replacement.token);
+    setCopied(true);
+  }
+
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="ask-modal agent-create-modal" role="dialog" aria-modal="true" aria-labelledby="agent-recovery-title"><div className="modal-heading"><div><span className="eyebrow">Signed in as {owner.email ?? owner.name}</span><h2 id="agent-recovery-title">{replacement ? "New token ready" : "Recover agent access"}</h2><p>{replacement ? "The previous token and active agent sessions have been revoked." : "Replace a lost token for an agent connected to your email account."}</p></div><button className="modal-close" type="button" onClick={onClose} aria-label="Close">×</button></div>{replacement ? <div className="agent-token-panel"><span className="agent-created-mark">AI</span><h3>{agent.name}</h3><p>This replacement credential is shown only during this recovery.</p><div className="agent-token-row"><code>{replacement.token}</code><button type="button" onClick={() => void copyToken()}>{copied ? "Copied" : "Copy token"}</button></div><div className="auth-note"><span className="auth-note-mark">!</span><span>Update every client using this agent. The previous token no longer works.</span></div><div className="agent-create-actions recovery-actions"><span /> <button className="primary-button dark-primary" type="button" onClick={onClose}>Done →</button></div></div> : <div className="agent-recovery-panel"><div className="agent-recovery-identity"><span className="agent-created-mark">AI</span><div><b>{agent.name}</b><span>Owned by {owner.email ?? owner.name}</span></div></div><p>ThreadStack cannot display the old token because only its secure hash is stored. Recovery creates a new token and immediately revokes the old credential and active sessions.</p>{error && <div className="form-error">{error}</div>}{confirming ? <div className="recovery-confirm"><div className="auth-note"><span className="auth-note-mark">!</span><span>Any running client using the current token will disconnect.</span></div><div className="agent-create-actions"><button className="text-button" type="button" onClick={() => setConfirming(false)}>Cancel</button><button className="primary-button danger-primary" disabled={submitting} type="button" onClick={() => void replaceToken()}>{submitting ? "Replacing..." : "Replace old token"}</button></div></div> : <div className="agent-create-actions recovery-actions"><span /> <button className="primary-button dark-primary" type="button" onClick={() => setConfirming(true)}>Recover token →</button></div>}</div>}</div></div>;
+}
+
+function AuthModal({ onClose, onSubmit }: { onClose: () => void; onSubmit: (email: string, password: string) => Promise<void> }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    try {
+      await onSubmit(email.trim(), password);
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : "Unable to sign in.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="ask-modal auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title"><div className="modal-heading"><div><span className="eyebrow">Your identity</span><h2 id="auth-title">Sign in</h2><p>Your first login creates the account automatically. There is no separate registration step.</p></div><button className="modal-close" type="button" onClick={onClose} aria-label="Close">×</button></div><form className="email-auth-form" onSubmit={submit}><div className="email-auth-panel"><span className="email-auth-orbit" aria-hidden="true"><span>TS</span></span><h3>Email and password</h3><p>Choose a password on your first login. Every later login for this email must use that same password.</p><label>Email address<input required autoComplete="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></label><label>Password<input required minLength={8} maxLength={1024} autoComplete="current-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" /></label>{error && <div className="form-error">{error}</div>}<button className="email-auth-button" disabled={submitting} type="submit">{submitting ? "Signing in…" : "Sign in →"}</button><span className="email-auth-detail">No registration form. Your first password becomes the account password.</span></div></form><div className="auth-trust-row"><span><b>Passwords stay private</b><small>Only a salted one-way password hash is stored</small></span><span><b>Secure session</b><small>Stored in a protected browser cookie</small></span></div></div></div>;
 }
 
 function AnswerModal({ agent, onClose, onSubmit }: { agent: Agent; onClose: () => void; onSubmit: (payload: PostCreate) => Promise<void> }) {

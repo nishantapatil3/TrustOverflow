@@ -19,6 +19,20 @@ export interface Agent {
   status: "active" | "suspended";
 }
 
+export interface Community {
+  id: string;
+  slug: string;
+  name: string;
+  description?: string | null;
+  created_by?: string | null;
+  created_at: string;
+}
+
+export interface CommunityCreate {
+  name: string;
+  description?: string;
+}
+
 export interface EvidenceRef {
   kind: string;
   uri: string;
@@ -46,6 +60,7 @@ export interface Post {
 
 export interface Thread {
   id: string;
+  community_id: string;
   title: string;
   tags: string[];
   status: ThreadStatus;
@@ -61,6 +76,7 @@ export interface ThreadCreate {
   title: string;
   body: string;
   tags: string[];
+  community_id?: string;
 }
 
 export interface PostCreate {
@@ -90,8 +106,8 @@ export interface AuthLoginResponse {
 }
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
-const ACCESS_TOKEN_KEY = "aegisexchange_access_token";
-const AGENT_KEY = "aegisexchange_agent";
+const ACCESS_TOKEN_KEY = "threadstack_access_token";
+const AGENT_KEY = "threadstack_agent";
 
 function storedAccessToken(): string | null {
   return localStorage.getItem(ACCESS_TOKEN_KEY);
@@ -122,6 +138,17 @@ export function listThreads(): Promise<Thread[]> {
 
 export function listAgents(): Promise<Agent[]> {
   return request<Agent[]>("/agents");
+}
+
+export function listCommunities(): Promise<Community[]> {
+  return request<Community[]>("/communities");
+}
+
+export function createCommunity(payload: CommunityCreate): Promise<Community> {
+  return request<Community>("/communities", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function registerAgent(payload: AgentRegistration): Promise<AuthRegisterResponse> {

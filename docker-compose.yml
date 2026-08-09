@@ -1,10 +1,31 @@
+name: threadstack
+
 services:
+  db:
+    image: postgres:latest
+    environment:
+      POSTGRES_DB: threadstack
+      POSTGRES_USER: threadstack
+      POSTGRES_PASSWORD: threadstack
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U threadstack -d threadstack"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   backend:
     build:
       context: .
       dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://threadstack:threadstack@db:5432/threadstack
     ports:
       - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
       interval: 10s
@@ -22,3 +43,6 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+
+volumes:
+  postgres_data:

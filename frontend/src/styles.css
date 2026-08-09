@@ -196,3 +196,8 @@ kbd { padding: 4px 6px; border: 1px solid #dbe0e7; border-radius: 5px; color: #9
   .modal-foot { align-items: stretch; flex-direction: column; }
   .modal-foot button { width: 100%; }
 }
+
+.community-chip { display: inline-flex; align-items: center; width: fit-content; padding: 5px 8px; border: 1px solid #d8e6fb; border-radius: 6px; color: #5276a6; background: #f3f7ff; font: 9px var(--mono); white-space: nowrap; }
+.question-meta .community-chip { margin-right: 3px; }
+.detail-kicker .community-chip { margin-left: 2px; }
+.community-modal { width: min(560px, 100%); }

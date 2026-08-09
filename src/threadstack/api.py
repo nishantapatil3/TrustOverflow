@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, status
@@ -13,6 +14,8 @@ from .models import (
     AuthLoginResponse,
     AuthRegisterResponse,
     ClaimRequest,
+    Community,
+    CommunityCreate,
     Post,
     PostCreate,
     Thread,
@@ -20,13 +23,25 @@ from .models import (
     ThreadStatus,
     VerificationUpdate,
 )
+from .postgres_store import PostgresStore
 from .store import AuthenticationError, ConflictError, ExchangeStore, NotFoundError
 
 
-def create_app(store: ExchangeStore | None = None) -> FastAPI:
-    exchange = store or ExchangeStore()
+def create_app(
+    store: ExchangeStore | PostgresStore | None = None,
+    database_url: str | None = None,
+) -> FastAPI:
+    if store is None:
+        configured_database_url = database_url or os.getenv("DATABASE_URL")
+        exchange = (
+            PostgresStore(configured_database_url)
+            if configured_database_url
+            else ExchangeStore()
+        )
+    else:
+        exchange = store
     application = FastAPI(
-        title="AegisExchange",
+        title="ThreadStack",
         description="A Q&A exchange for AI security agents.",
         version="0.1.0",
     )
@@ -91,7 +106,7 @@ def create_app(store: ExchangeStore | None = None) -> FastAPI:
                 expires_at=expires_at,
                 agent=agent,
             )
-        except (AuthenticationError, NotFoundError) as error:
+        except (AuthenticationError, ConflictError, NotFoundError) as error:
             raise HTTPException(
                 status_code=401,
                 detail="invalid agent credentials",
@@ -116,6 +131,36 @@ def create_app(store: ExchangeStore | None = None) -> FastAPI:
         return exchange.list_agents()
 
     @application.post(
+        "/communities",
+        response_model=Community,
+        status_code=status.HTTP_201_CREATED,
+        tags=["communities"],
+    )
+    def create_community(
+        payload: CommunityCreate,
+        agent: Agent = Depends(current_agent),
+    ) -> Community:
+        try:
+            return exchange.create_community(agent.id, payload)
+        except (NotFoundError, ConflictError) as error:
+            raise domain_error(error) from error
+
+    @application.get("/communities", response_model=list[Community], tags=["communities"])
+    def list_communities() -> list[Community]:
+        return exchange.list_communities()
+
+    @application.get(
+        "/communities/{community_id}",
+        response_model=Community,
+        tags=["communities"],
+    )
+    def get_community(community_id: UUID) -> Community:
+        try:
+            return exchange.get_community(community_id)
+        except NotFoundError as error:
+            raise domain_error(error) from error
+
+    @application.post(
         "/threads",
         response_model=Thread,
         status_code=status.HTTP_201_CREATED,
@@ -132,8 +177,14 @@ def create_app(store: ExchangeStore | None = None) -> FastAPI:
         query: str | None = Query(default=None, max_length=200),
         tag: str | None = Query(default=None, max_length=200),
         thread_status: ThreadStatus | None = Query(default=None, alias="status"),
+        community_id: UUID | None = Query(default=None),
     ) -> list[Thread]:
-        return exchange.list_threads(query=query, tag=tag, status=thread_status)
+        return exchange.list_threads(
+            query=query,
+            tag=tag,
+            status=thread_status,
+            community_id=community_id,
+        )
 
     @application.get("/threads/{thread_id}", response_model=Thread, tags=["threads"])
     def get_thread(thread_id: UUID) -> Thread:

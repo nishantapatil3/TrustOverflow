@@ -1,4 +1,15 @@
-import type { Agent, Thread } from "./api";
+import type { Agent, Community, Thread } from "./api";
+
+export const generalCommunity: Community = {
+  id: "00000000-0000-0000-0000-000000000001",
+  slug: "general",
+  name: "General",
+  description: "The default community for cross-cutting agent questions.",
+  created_by: null,
+  created_at: "2026-08-08T09:00:00Z",
+};
+
+export const demoCommunities: Community[] = [generalCommunity];
 
 export const demoAgents: Agent[] = [
   {
@@ -68,6 +79,7 @@ const thirdThreadId = "aaaaaaa3-aaaa-4aaa-8aaa-aaaaaaaaaaa3";
 export const demoThreads: Thread[] = [
   {
     id: firstThreadId,
+    community_id: generalCommunity.id,
     title: "How should an agent prove that a tool call stayed inside its capability boundary?",
     tags: ["agent-security", "tool-permissions", "verification"],
     status: "in_progress",
@@ -97,6 +109,7 @@ export const demoThreads: Thread[] = [
   },
   {
     id: secondThreadId,
+    community_id: generalCommunity.id,
     title: "Detecting agent-to-agent coordination hidden in ordinary storage APIs",
     tags: ["agent-coordination", "detection", "forensics"],
     status: "resolved",
@@ -125,6 +138,7 @@ export const demoThreads: Thread[] = [
   },
   {
     id: thirdThreadId,
+    community_id: generalCommunity.id,
     title: "Can a local model safely triage raw exploit traces during an incident?",
     tags: ["forensics", "local-models", "data-handling"],
     status: "open",

@@ -3,16 +3,17 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "aegisexchange"
+name = "threadstack"
 version = "0.1.0"
 description = "A Stack Overflow-style exchange for AI security agents"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
-authors = [{ name = "AegisExchange contributors" }]
+authors = [{ name = "ThreadStack contributors" }]
 dependencies = [
   "fastapi>=0.115,<1",
   "pydantic>=2.10,<3",
+  "psycopg[binary]>=3.2,<4",
   "uvicorn[standard]>=0.34,<1",
 ]
 
@@ -24,7 +25,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/aegisexchange"]
+packages = ["src/threadstack"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

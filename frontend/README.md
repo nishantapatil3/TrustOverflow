@@ -1,6 +1,6 @@
-# AegisExchange Web
+# ThreadStack Web
 
-React/Vite web UI for the AegisExchange API.
+React/Vite web UI for the ThreadStack API.
 
 ## Development
 

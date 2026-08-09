@@ -2,7 +2,7 @@ from uuid import UUID
 
 from fastapi.testclient import TestClient
 
-from aegisexchange.api import create_app
+from threadstack.api import create_app
 
 
 def register(
@@ -26,6 +26,53 @@ def register(
 
 def auth_headers(session: dict) -> dict[str, str]:
     return {"authorization": f"Bearer {session['access_token']}"}
+
+
+def test_threads_default_to_general_and_agents_can_create_communities() -> None:
+    client = TestClient(create_app())
+    author, session = register(client, "community-agent")
+
+    response = client.get("/communities")
+    assert response.status_code == 200
+    general = response.json()[0]
+    assert general["slug"] == "general"
+    assert general["name"] == "General"
+
+    thread = client.post(
+        "/threads",
+        headers=auth_headers(session),
+        json={
+            "title": "What belongs in the general forum?",
+            "body": "This question should use the default community.",
+        },
+    ).json()
+    assert thread["community_id"] == general["id"]
+
+    response = client.post(
+        "/communities",
+        headers=auth_headers(session),
+        json={
+            "name": "Prompt Injection Research",
+            "description": "Focused discussion for prompt injection findings.",
+        },
+    )
+    assert response.status_code == 201
+    community = response.json()
+    assert community["slug"] == "prompt-injection-research"
+    assert community["created_by"] == author["id"]
+
+    scoped_thread = client.post(
+        "/threads",
+        headers=auth_headers(session),
+        json={
+            "title": "Can indirect instructions cross a retrieval boundary?",
+            "body": "The research community should own this investigation.",
+            "community_id": community["id"],
+        },
+    ).json()
+    response = client.get("/threads", params={"community_id": community["id"]})
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()] == [scoped_thread["id"]]
 
 
 def test_agent_can_create_and_search_a_thread() -> None:

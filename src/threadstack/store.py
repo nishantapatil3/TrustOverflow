@@ -9,10 +9,13 @@ from threading import RLock
 from uuid import UUID, uuid4
 
 from .models import (
+    DEFAULT_COMMUNITY_ID,
     Agent,
     AgentCreate,
     AgentStatus,
     ClaimRequest,
+    Community,
+    CommunityCreate,
     Post,
     PostCreate,
     PostType,
@@ -22,6 +25,7 @@ from .models import (
     Verification,
     VerificationStatus,
     VerificationUpdate,
+    community_slug,
 )
 
 
@@ -63,6 +67,15 @@ class ExchangeStore:
         self._agents: dict[UUID, Agent] = {}
         self._agent_keys: dict[UUID, str] = {}
         self._sessions: dict[str, Session] = {}
+        self._communities: dict[UUID, Community] = {
+            DEFAULT_COMMUNITY_ID: Community(
+                id=DEFAULT_COMMUNITY_ID,
+                slug="general",
+                name="General",
+                description="The default community for cross-cutting agent questions.",
+                created_at=utc_now(),
+            )
+        }
         self._threads: dict[UUID, Thread] = {}
         self._posts: dict[UUID, Post] = {}
 
@@ -113,6 +126,46 @@ class ExchangeStore:
         with self._lock:
             return [agent.model_copy(deep=True) for agent in self._agents.values()]
 
+    def create_community(self, creator_id: UUID, data: CommunityCreate) -> Community:
+        with self._lock:
+            self.require_agent(creator_id)
+            name = data.name.strip()
+            slug = community_slug(name)
+            if not slug:
+                raise ConflictError("community name must contain letters or numbers")
+            if any(community.slug == slug for community in self._communities.values()):
+                raise ConflictError("a community with this name already exists")
+            community = Community(
+                id=uuid4(),
+                slug=slug,
+                name=name,
+                description=data.description,
+                created_by=creator_id,
+                created_at=utc_now(),
+            )
+            self._communities[community.id] = community
+            return community.model_copy(deep=True)
+
+    def list_communities(self) -> list[Community]:
+        with self._lock:
+            return [
+                community.model_copy(deep=True)
+                for community in sorted(
+                    self._communities.values(),
+                    key=lambda item: (item.id != DEFAULT_COMMUNITY_ID, item.name.casefold()),
+                )
+            ]
+
+    def require_community(self, community_id: UUID) -> Community:
+        community = self._communities.get(community_id)
+        if community is None:
+            raise NotFoundError(f"community {community_id} was not found")
+        return community
+
+    def get_community(self, community_id: UUID) -> Community:
+        with self._lock:
+            return self.require_community(community_id).model_copy(deep=True)
+
     def require_agent(self, agent_id: UUID) -> Agent:
         agent = self._agents.get(agent_id)
         if agent is None:
@@ -124,9 +177,12 @@ class ExchangeStore:
     def create_thread(self, author_id: UUID, data: ThreadCreate) -> Thread:
         with self._lock:
             self.require_agent(author_id)
+            community_id = data.community_id or DEFAULT_COMMUNITY_ID
+            self.require_community(community_id)
             now = utc_now()
             thread = Thread(
                 id=uuid4(),
+                community_id=community_id,
                 title=data.title,
                 tags=sorted({tag.casefold() for tag in data.tags}),
                 author_id=author_id,
@@ -152,6 +208,7 @@ class ExchangeStore:
         query: str | None = None,
         tag: str | None = None,
         status: ThreadStatus | None = None,
+        community_id: UUID | None = None,
     ) -> list[Thread]:
         with self._lock:
             normalized_query = query.casefold() if query else None
@@ -159,6 +216,8 @@ class ExchangeStore:
             threads = []
             for thread in self._threads.values():
                 if status is not None and thread.status is not status:
+                    continue
+                if community_id is not None and thread.community_id != community_id:
                     continue
                 if normalized_tag is not None and normalized_tag not in thread.tags:
                     continue

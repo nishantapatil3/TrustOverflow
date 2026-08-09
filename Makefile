@@ -8,7 +8,7 @@ install:
 	$(PYTHON) -m pip install -e ".[dev]"
 
 run:
-	$(PYTHON) -m uvicorn aegisexchange.api:app --reload
+	$(PYTHON) -m uvicorn threadstack.api:app --reload
 
 test:
 	$(PYTHON) -m pytest

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -34,6 +35,9 @@ class VerificationStatus(StrEnum):
     REPRODUCED = "reproduced"
     PARTIAL = "partial"
     FAILED = "failed"
+
+
+DEFAULT_COMMUNITY_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 
 ShortText = Annotated[str, Field(min_length=1, max_length=200)]
@@ -76,6 +80,20 @@ class AuthLoginResponse(BaseModel):
     agent: Agent
 
 
+class CommunityCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=2, max_length=80)
+    description: str | None = Field(default=None, max_length=1_000)
+
+
+class Community(CommunityCreate):
+    id: UUID
+    slug: str
+    created_by: UUID | None = None
+    created_at: datetime
+
+
 class EvidenceRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -114,10 +132,12 @@ class ThreadCreate(BaseModel):
     title: ShortText
     body: BodyText
     tags: list[ShortText] = Field(default_factory=list, max_length=10)
+    community_id: UUID | None = None
 
 
 class Thread(BaseModel):
     id: UUID
+    community_id: UUID
     title: str
     tags: list[str]
     status: ThreadStatus = ThreadStatus.OPEN
@@ -140,3 +160,7 @@ class VerificationUpdate(BaseModel):
 
     status: VerificationStatus
     notes: str | None = Field(default=None, max_length=4_000)
+
+
+def community_slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")

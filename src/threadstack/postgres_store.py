@@ -230,6 +230,36 @@ class PostgresStore:
             is not None
         )
 
+    @staticmethod
+    def _record_audit(
+        connection: psycopg.Connection[Any],
+        actor_id: UUID | None,
+        action: str,
+        target_type: str,
+        target_id: UUID | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO audit_events (
+                actor_id, action, target_type, target_id, metadata, created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (actor_id, action, target_type, target_id, Jsonb(metadata or {}), utc_now()),
+        )
+
+    def record_audit(
+        self,
+        actor_id: UUID | None,
+        action: str,
+        target_type: str,
+        target_id: UUID | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        with self._connection() as connection:
+            self._record_audit(connection, actor_id, action, target_type, target_id, metadata)
+
     def _thread_from_row(
         self,
         connection: psycopg.Connection[Any],
@@ -387,6 +417,14 @@ class PostgresStore:
                     "INSERT INTO agent_keys (agent_id, key_digest) VALUES (%s, %s)",
                     (agent.id, digest_secret(token)),
                 )
+                self._record_audit(
+                    connection,
+                    owner_id,
+                    "agent.created",
+                    "agent",
+                    agent.id,
+                    {"name": agent.name},
+                )
         except psycopg.errors.UniqueViolation as error:
             raise ConflictError("an agent with this name already exists") from error
         return agent, token
@@ -411,6 +449,7 @@ class PostgresStore:
                 (agent.id, digest_secret(token)),
             )
             connection.execute("DELETE FROM sessions WHERE agent_id = %s", (agent.id,))
+            self._record_audit(connection, owner_id, "agent.token_rotated", "agent", agent.id)
             return agent, token
 
     def login_or_create_user(self, email: str, password: str) -> tuple[Agent, bool]:
@@ -431,6 +470,13 @@ class PostgresStore:
                         credentials["password_hash"],
                     ):
                         raise AuthenticationError("invalid email or password")
+                    self._record_audit(
+                        connection,
+                        existing["id"],
+                        "user.authenticated",
+                        "user",
+                        existing["id"],
+                    )
                     return self._agent_from_row(existing), False
 
                 used_names = {
@@ -477,6 +523,7 @@ class PostgresStore:
                     """,
                     (user.id, hash_password(password), user.created_at),
                 )
+                self._record_audit(connection, user.id, "user.created", "user", user.id)
                 return user, True
         except psycopg.errors.UniqueViolation as error:
             with self._connection() as connection:
@@ -505,6 +552,7 @@ class PostgresStore:
                 "INSERT INTO sessions (token_digest, agent_id, expires_at) VALUES (%s, %s, %s)",
                 (digest_secret(access_token), agent_id, expires_at),
             )
+            self._record_audit(connection, agent_id, "session.created", "session", None)
             return access_token, expires_at, agent
 
     def authenticate_session(self, access_token: str) -> Agent:
@@ -612,6 +660,14 @@ class PostgresStore:
                         community.created_at,
                     ),
                 )
+                self._record_audit(
+                    connection,
+                    creator_id,
+                    "community.created",
+                    "community",
+                    community.id,
+                    {"slug": community.slug},
+                )
                 return community
         except psycopg.errors.UniqueViolation as error:
             raise ConflictError("a community with this name already exists") from error
@@ -675,6 +731,7 @@ class PostgresStore:
                     now,
                 ),
             )
+            self._record_audit(connection, author_id, "thread.created", "thread", thread_id)
             return self._thread_from_row(
                 connection,
                 self._require_thread(connection, thread_id),
@@ -772,6 +829,7 @@ class PostgresStore:
                 "UPDATE threads SET status = %s, updated_at = %s WHERE id = %s",
                 (ThreadStatus.IN_PROGRESS.value, now, thread_id),
             )
+            self._record_audit(connection, author_id, "post.created", "post", post_id)
             row = connection.execute(self._post_select(), (post_id,)).fetchone()
             assert row is not None
             return self._post_from_row(row)
@@ -812,6 +870,7 @@ class PostgresStore:
                 "UPDATE threads SET updated_at = %s WHERE id = %s",
                 (utc_now(), post["thread_id"]),
             )
+            self._record_audit(connection, author_id, "post.updated", "post", post_id)
             row = connection.execute(self._post_select(), (post_id,)).fetchone()
             assert row is not None
             return self._post_from_row(
@@ -830,6 +889,13 @@ class PostgresStore:
 
             if post["parent_id"] is None:
                 connection.execute("DELETE FROM threads WHERE id = %s", (post["thread_id"],))
+                self._record_audit(
+                    connection,
+                    author_id,
+                    "thread.deleted",
+                    "thread",
+                    post["thread_id"],
+                )
                 return
 
             connection.execute(
@@ -849,6 +915,7 @@ class PostgresStore:
                 "UPDATE threads SET updated_at = %s WHERE id = %s",
                 (utc_now(), post["thread_id"]),
             )
+            self._record_audit(connection, author_id, "post.deleted", "post", post_id)
 
     def update_thread(self, thread_id: UUID, author_id: UUID, data: ThreadUpdate) -> Thread:
         with self._connection() as connection:
@@ -892,6 +959,7 @@ class PostgresStore:
                         "UPDATE threads SET updated_at = %s WHERE id = %s",
                         (now, thread_id),
                     )
+            self._record_audit(connection, author_id, "thread.updated", "thread", thread_id)
             return self._thread_from_row(
                 connection,
                 self._require_thread(connection, thread_id),
@@ -905,6 +973,7 @@ class PostgresStore:
             if thread["author_id"] != author_id:
                 raise PermissionDeniedError("only the thread author can delete this thread")
             connection.execute("DELETE FROM threads WHERE id = %s", (thread_id,))
+            self._record_audit(connection, author_id, "thread.deleted", "thread", thread_id)
 
     def claim_thread(self, thread_id: UUID, agent_id: UUID, data: ClaimRequest) -> Thread:
         now = utc_now()
@@ -928,6 +997,7 @@ class PostgresStore:
                 """,
                 (agent_id, expires_at, ThreadStatus.IN_PROGRESS.value, now, thread_id),
             )
+            self._record_audit(connection, agent_id, "thread.claimed", "thread", thread_id)
             return self._thread_from_row(
                 connection,
                 self._require_thread(connection, thread_id),
@@ -960,6 +1030,7 @@ class PostgresStore:
                 "UPDATE threads SET status = %s, updated_at = %s WHERE id = %s",
                 (thread_status, now, post["thread_id"]),
             )
+            self._record_audit(connection, verifier_id, "post.verified", "post", post_id)
             row = connection.execute(self._post_select(), (post_id,)).fetchone()
             assert row is not None
             return self._post_from_row(
@@ -983,6 +1054,7 @@ class PostgresStore:
                 "SELECT COUNT(*)::int AS score FROM upvotes WHERE thread_id = %s",
                 (thread_id,),
             ).fetchone()["score"]
+            self._record_audit(connection, agent_id, "thread.upvoted", "thread", thread_id)
             return VoteResult(target_id=thread_id, score=score, upvoted=True)
 
     def remove_thread_upvote(self, thread_id: UUID, agent_id: UUID) -> VoteResult:
@@ -997,6 +1069,7 @@ class PostgresStore:
                 "SELECT COUNT(*)::int AS score FROM upvotes WHERE thread_id = %s",
                 (thread_id,),
             ).fetchone()["score"]
+            self._record_audit(connection, agent_id, "thread.upvote_removed", "thread", thread_id)
             return VoteResult(target_id=thread_id, score=score, upvoted=False)
 
     def upvote_post(self, post_id: UUID, agent_id: UUID) -> VoteResult:
@@ -1017,6 +1090,7 @@ class PostgresStore:
                 "SELECT COUNT(*)::int AS score FROM upvotes WHERE post_id = %s",
                 (post_id,),
             ).fetchone()["score"]
+            self._record_audit(connection, agent_id, "post.upvoted", "post", post_id)
             return VoteResult(target_id=post_id, score=score, upvoted=True)
 
     def remove_post_upvote(self, post_id: UUID, agent_id: UUID) -> VoteResult:
@@ -1033,4 +1107,5 @@ class PostgresStore:
                 "SELECT COUNT(*)::int AS score FROM upvotes WHERE post_id = %s",
                 (post_id,),
             ).fetchone()["score"]
+            self._record_audit(connection, agent_id, "post.upvote_removed", "post", post_id)
             return VoteResult(target_id=post_id, score=score, upvoted=False)

@@ -133,7 +133,7 @@ def build_mcp_server(
         ctx: Context = None,
     ) -> dict[str, Any]:
         """Store a base64-encoded evidence bundle and return its object reference."""
-        current_agent(ctx)
+        agent = current_agent(ctx)
         try:
             payload = base64.b64decode(content_base64, validate=True)
         except (ValueError, TypeError) as error:
@@ -142,7 +142,14 @@ def build_mcp_server(
         if len(payload) > max_bytes:
             raise ToolError("evidence object is too large")
         try:
-            return _dump(evidence_storage.put(payload, content_type=content_type))
+            stored = evidence_storage.put(payload, content_type=content_type)
+            exchange.record_audit(
+                agent.id,
+                "evidence.stored",
+                "evidence",
+                metadata={"uri": stored.uri, "size": stored.size},
+            )
+            return _dump(stored)
         except ObjectStorageError as error:
             raise ToolError(str(error)) from error
 

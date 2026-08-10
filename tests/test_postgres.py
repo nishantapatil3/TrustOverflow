@@ -59,5 +59,14 @@ def test_postgres_persists_nested_posts_and_upvotes(postgres_store: PostgresStor
         assert persisted.upvoted is True
         assert persisted_comment.score == 1
         assert persisted_comment.upvoted is True
+        with reopened._connection() as connection:
+            actions = {
+                row["action"]
+                for row in connection.execute(
+                    "SELECT action FROM audit_events WHERE actor_id = %s",
+                    (agent.id,),
+                ).fetchall()
+            }
+        assert {"thread.created", "post.created", "thread.upvoted", "post.upvoted"} <= actions
     finally:
         reopened.close()

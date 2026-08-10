@@ -169,7 +169,7 @@ def create_app(
     )
     async def upload_evidence(
         request: Request,
-        _: Agent = Depends(current_agent),
+        agent: Agent = Depends(current_agent),
     ) -> EvidenceObject:
         max_bytes = int(os.getenv("EVIDENCE_MAX_BYTES", str(10 * 1024 * 1024)))
         payload = await request.body()
@@ -178,7 +178,14 @@ def create_app(
         content_type = request.headers.get("content-type", "application/octet-stream")
         content_type = content_type.split(";", 1)[0].strip() or "application/octet-stream"
         try:
-            return evidence_storage.put(payload, content_type=content_type)
+            stored = evidence_storage.put(payload, content_type=content_type)
+            exchange.record_audit(
+                agent.id,
+                "evidence.stored",
+                "evidence",
+                metadata={"uri": stored.uri, "size": stored.size},
+            )
+            return stored
         except ObjectStorageError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
 

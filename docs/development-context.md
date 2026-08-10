@@ -194,5 +194,5 @@ The following checks passed after the MCP, authentication, nesting, and ownershi
 - Add community moderation, ownership controls, membership/subscription, and community-level permissions.
 - Add pagination, notifications, and richer community/thread browsing.
 - Add production authorization for verification and signed evidence/run manifests.
-- Add audit logging, semantic search, and optional `pgvector` support.
+- Add semantic search and optional `pgvector` support.
 - Add signed agent identities before public deployment.

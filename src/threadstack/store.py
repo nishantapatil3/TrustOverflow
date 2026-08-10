@@ -8,6 +8,7 @@ from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from threading import RLock
+from typing import Any
 from uuid import UUID, uuid4
 
 from .models import (
@@ -143,6 +144,37 @@ class ExchangeStore:
         self._posts: dict[UUID, Post] = {}
         self._thread_upvotes: dict[UUID, set[UUID]] = {}
         self._post_upvotes: dict[UUID, set[UUID]] = {}
+        self._audit_events: list[dict[str, Any]] = []
+
+    def _record_audit(
+        self,
+        actor_id: UUID | None,
+        action: str,
+        target_type: str,
+        target_id: UUID | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._audit_events.append(
+            {
+                "actor_id": actor_id,
+                "action": action,
+                "target_type": target_type,
+                "target_id": target_id,
+                "metadata": metadata or {},
+                "created_at": utc_now(),
+            }
+        )
+
+    def record_audit(
+        self,
+        actor_id: UUID | None,
+        action: str,
+        target_type: str,
+        target_id: UUID | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        with self._lock:
+            self._record_audit(actor_id, action, target_type, target_id, metadata)
 
     def _post_view(self, post: Post, viewer_id: UUID | None = None) -> Post:
         upvoters = self._post_upvotes.get(post.id, set())
@@ -193,6 +225,13 @@ class ExchangeStore:
             self._agents[agent.id] = agent
             token = secrets.token_urlsafe(32)
             self._agent_keys[agent.id] = digest_secret(token)
+            self._record_audit(
+                owner.id,
+                "agent.created",
+                "agent",
+                agent.id,
+                {"name": agent.name},
+            )
             return agent.model_copy(deep=True), token
 
     def rotate_agent_token(self, owner_id: UUID, agent_id: UUID) -> tuple[Agent, str]:
@@ -211,6 +250,7 @@ class ExchangeStore:
                 for digest, session in self._sessions.items()
                 if session.agent_id != agent.id
             }
+            self._record_audit(owner.id, "agent.token_rotated", "agent", agent.id)
             return agent.model_copy(deep=True), token
 
     def login_or_create_user(self, email: str, password: str) -> tuple[Agent, bool]:
@@ -221,6 +261,7 @@ class ExchangeStore:
                 password_digest = self._user_passwords.get(existing_id)
                 if password_digest is None or not verify_password(password, password_digest):
                     raise AuthenticationError("invalid email or password")
+                self._record_audit(existing_id, "user.authenticated", "user", existing_id)
                 return self.require_agent(existing_id).model_copy(deep=True), False
 
             name = email_username(normalized_email)
@@ -237,6 +278,7 @@ class ExchangeStore:
             self._agents[user.id] = user
             self._email_users[normalized_email] = user.id
             self._user_passwords[user.id] = hash_password(password)
+            self._record_audit(user.id, "user.created", "user", user.id)
             return user.model_copy(deep=True), True
 
     def create_session(self, agent_id: UUID) -> tuple[str, datetime, Agent]:
@@ -248,6 +290,7 @@ class ExchangeStore:
                 agent_id=agent_id,
                 expires_at=expires_at,
             )
+            self._record_audit(agent_id, "session.created", "session")
             return access_token, expires_at, agent.model_copy(deep=True)
 
     def authenticate_session(self, access_token: str) -> Agent:
@@ -305,6 +348,13 @@ class ExchangeStore:
                 created_at=utc_now(),
             )
             self._communities[community.id] = community
+            self._record_audit(
+                creator_id,
+                "community.created",
+                "community",
+                community.id,
+                {"slug": community.slug},
+            )
             return community.model_copy(deep=True)
 
     def list_communities(self) -> list[Community]:
@@ -361,6 +411,7 @@ class ExchangeStore:
             thread.posts.append(root_post)
             self._threads[thread.id] = thread
             self._posts[root_post.id] = root_post
+            self._record_audit(author_id, "thread.created", "thread", thread.id)
             return self._thread_view(thread)
 
     def list_threads(
@@ -426,6 +477,7 @@ class ExchangeStore:
             thread.status = ThreadStatus.IN_PROGRESS
             thread.updated_at = post.created_at
             self._posts[post.id] = post
+            self._record_audit(author_id, "post.created", "post", post.id)
             return self._post_view(post, author_id)
 
     def update_post(self, post_id: UUID, author_id: UUID, data: PostUpdate) -> Post:
@@ -444,6 +496,7 @@ class ExchangeStore:
                 setattr(post, field, value)
             thread = self.require_thread(post.thread_id)
             thread.updated_at = utc_now()
+            self._record_audit(author_id, "post.updated", "post", post_id)
             return self._post_view(post, author_id)
 
     def delete_post(self, post_id: UUID, author_id: UUID) -> None:
@@ -459,9 +512,10 @@ class ExchangeStore:
             if post.parent_id is None:
                 for thread_post in thread.posts:
                     self._posts.pop(thread_post.id, None)
-                    self._post_upvotes.pop(thread_post.id, None)
+                self._post_upvotes.pop(thread_post.id, None)
                 self._thread_upvotes.pop(thread.id, None)
                 self._threads.pop(thread.id, None)
+                self._record_audit(author_id, "thread.deleted", "thread", thread.id)
                 return
 
             descendants = {post_id}
@@ -479,6 +533,7 @@ class ExchangeStore:
                 self._posts.pop(descendant_id, None)
                 self._post_upvotes.pop(descendant_id, None)
             thread.updated_at = utc_now()
+            self._record_audit(author_id, "post.deleted", "post", post_id)
 
     def update_thread(self, thread_id: UUID, author_id: UUID, data: ThreadUpdate) -> Thread:
         with self._lock:
@@ -503,6 +558,7 @@ class ExchangeStore:
                     raise ConflictError("thread has no root post")
                 root_post.body = changes["body"]
             thread.updated_at = utc_now()
+            self._record_audit(author_id, "thread.updated", "thread", thread_id)
             return self._thread_view(thread, author_id)
 
     def delete_thread(self, thread_id: UUID, author_id: UUID) -> None:
@@ -513,9 +569,10 @@ class ExchangeStore:
                 raise PermissionDeniedError("only the thread author can delete this thread")
             for post in thread.posts:
                 self._posts.pop(post.id, None)
-                self._post_upvotes.pop(post.id, None)
+            self._post_upvotes.pop(post.id, None)
             self._thread_upvotes.pop(thread_id, None)
             self._threads.pop(thread_id, None)
+            self._record_audit(author_id, "thread.deleted", "thread", thread_id)
 
     def claim_thread(self, thread_id: UUID, agent_id: UUID, data: ClaimRequest) -> Thread:
         with self._lock:
@@ -534,6 +591,7 @@ class ExchangeStore:
             thread.claim_expires_at = now + timedelta(minutes=data.lease_minutes)
             thread.status = ThreadStatus.IN_PROGRESS
             thread.updated_at = now
+            self._record_audit(agent_id, "thread.claimed", "thread", thread_id)
             return self._thread_view(thread, agent_id)
 
     def verify_post(self, post_id: UUID, verifier_id: UUID, data: VerificationUpdate) -> Post:
@@ -557,6 +615,7 @@ class ExchangeStore:
             else:
                 thread.status = ThreadStatus.IN_PROGRESS
             thread.updated_at = now
+            self._record_audit(verifier_id, "post.verified", "post", post_id)
             return self._post_view(post, verifier_id)
 
     def upvote_thread(self, thread_id: UUID, agent_id: UUID) -> VoteResult:
@@ -565,6 +624,7 @@ class ExchangeStore:
             self.require_thread(thread_id)
             self._thread_upvotes.setdefault(thread_id, set()).add(agent_id)
             upvoters = self._thread_upvotes[thread_id]
+            self._record_audit(agent_id, "thread.upvoted", "thread", thread_id)
             return VoteResult(target_id=thread_id, score=len(upvoters), upvoted=True)
 
     def remove_thread_upvote(self, thread_id: UUID, agent_id: UUID) -> VoteResult:
@@ -573,6 +633,7 @@ class ExchangeStore:
             self.require_thread(thread_id)
             self._thread_upvotes.setdefault(thread_id, set()).discard(agent_id)
             upvoters = self._thread_upvotes[thread_id]
+            self._record_audit(agent_id, "thread.upvote_removed", "thread", thread_id)
             return VoteResult(target_id=thread_id, score=len(upvoters), upvoted=False)
 
     def upvote_post(self, post_id: UUID, agent_id: UUID) -> VoteResult:
@@ -582,6 +643,7 @@ class ExchangeStore:
                 raise NotFoundError(f"post {post_id} was not found")
             self._post_upvotes.setdefault(post_id, set()).add(agent_id)
             upvoters = self._post_upvotes[post_id]
+            self._record_audit(agent_id, "post.upvoted", "post", post_id)
             return VoteResult(target_id=post_id, score=len(upvoters), upvoted=True)
 
     def remove_post_upvote(self, post_id: UUID, agent_id: UUID) -> VoteResult:
@@ -591,4 +653,5 @@ class ExchangeStore:
                 raise NotFoundError(f"post {post_id} was not found")
             self._post_upvotes.setdefault(post_id, set()).discard(agent_id)
             upvoters = self._post_upvotes[post_id]
+            self._record_audit(agent_id, "post.upvote_removed", "post", post_id)
             return VoteResult(target_id=post_id, score=len(upvoters), upvoted=False)

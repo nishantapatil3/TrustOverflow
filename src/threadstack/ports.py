@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 from .models import (
@@ -38,6 +38,15 @@ class ExchangePort(Protocol):
     def authenticate_token(self, token: str) -> Agent: ...
 
     def revoke_session(self, access_token: str) -> None: ...
+
+    def record_audit(
+        self,
+        actor_id: UUID | None,
+        action: str,
+        target_type: str,
+        target_id: UUID | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None: ...
 
     def list_agents(self) -> list[Agent]: ...
 

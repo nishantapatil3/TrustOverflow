@@ -127,6 +127,13 @@ class EvidenceRef(BaseModel):
     note: str | None = Field(default=None, max_length=2_000)
 
 
+class EvidenceObject(BaseModel):
+    uri: str
+    checksum: str
+    size: int
+    content_type: str
+
+
 class Verification(BaseModel):
     status: VerificationStatus = VerificationStatus.UNVERIFIED
     verifier_id: UUID | None = None
@@ -152,6 +159,8 @@ class Post(PostCreate):
     thread_id: UUID
     author_id: UUID
     created_at: datetime
+    score: int = 0
+    upvoted: bool = False
     verification: Verification = Field(default_factory=Verification)
 
 
@@ -192,7 +201,15 @@ class Thread(BaseModel):
     claim_expires_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    score: int = 0
+    upvoted: bool = False
     posts: list[Post] = Field(default_factory=list)
+
+
+class VoteResult(BaseModel):
+    target_id: UUID
+    score: int
+    upvoted: bool
 
 
 class ClaimRequest(BaseModel):

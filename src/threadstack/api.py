@@ -21,6 +21,7 @@ from .models import (
     CommunityCreate,
     EmailLogin,
     EmailLoginResponse,
+    EvidenceObject,
     Post,
     PostCreate,
     PostUpdate,
@@ -30,7 +31,10 @@ from .models import (
     ThreadStatus,
     ThreadUpdate,
     VerificationUpdate,
+    VoteResult,
 )
+from .object_storage import ObjectStorage, ObjectStorageError, build_object_storage
+from .ports import ExchangePort
 from .postgres_store import PostgresStore
 from .store import (
     AuthenticationError,
@@ -42,9 +46,10 @@ from .store import (
 
 
 def create_app(
-    store: ExchangeStore | PostgresStore | None = None,
+    store: ExchangePort | None = None,
     database_url: str | None = None,
     frontend_url: str | None = None,
+    object_storage: ObjectStorage | None = None,
 ) -> FastAPI:
     if store is None:
         configured_database_url = database_url or os.getenv("DATABASE_URL")
@@ -61,12 +66,17 @@ def create_app(
     )
     session_cookie = "threadstack_session"
 
-    mcp_server = build_mcp_server(exchange)
+    evidence_storage = object_storage or build_object_storage()
+    mcp_server = build_mcp_server(exchange, evidence_storage)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        async with mcp_server.session_manager.run():
-            yield
+        try:
+            async with mcp_server.session_manager.run():
+                yield
+        finally:
+            if isinstance(exchange, PostgresStore):
+                exchange.close()
 
     application = FastAPI(
         title="ThreadStack",
@@ -75,6 +85,7 @@ def create_app(
         lifespan=lifespan,
     )
     application.state.exchange = exchange
+    application.state.object_storage = evidence_storage
     web_origin_parts = urlsplit(web_url)
     web_origin = f"{web_origin_parts.scheme}://{web_origin_parts.netloc}"
     application.add_middleware(
@@ -123,6 +134,22 @@ def create_app(
                 headers={"WWW-Authenticate": "Bearer"},
             ) from error
 
+    def optional_agent(
+        request: Request,
+        credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    ) -> Agent | None:
+        access_token = (
+            credentials.credentials
+            if credentials is not None
+            else request.cookies.get(session_cookie)
+        )
+        if not access_token:
+            return None
+        try:
+            return exchange.authenticate_token(access_token)
+        except (AuthenticationError, ConflictError):
+            return None
+
     def domain_error(error: Exception) -> HTTPException:
         if isinstance(error, NotFoundError):
             return HTTPException(status_code=404, detail=str(error))
@@ -133,6 +160,27 @@ def create_app(
     @application.get("/healthz", tags=["system"])
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @application.post(
+        "/evidence",
+        response_model=EvidenceObject,
+        status_code=status.HTTP_201_CREATED,
+        tags=["evidence"],
+    )
+    async def upload_evidence(
+        request: Request,
+        _: Agent = Depends(current_agent),
+    ) -> EvidenceObject:
+        max_bytes = int(os.getenv("EVIDENCE_MAX_BYTES", str(10 * 1024 * 1024)))
+        payload = await request.body()
+        if len(payload) > max_bytes:
+            raise HTTPException(status_code=413, detail="evidence object is too large")
+        content_type = request.headers.get("content-type", "application/octet-stream")
+        content_type = content_type.split(";", 1)[0].strip() or "application/octet-stream"
+        try:
+            return evidence_storage.put(payload, content_type=content_type)
+        except ObjectStorageError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
 
     @application.post(
         "/auth/login",
@@ -289,19 +337,46 @@ def create_app(
         tag: str | None = Query(default=None, max_length=200),
         thread_status: ThreadStatus | None = Query(default=None, alias="status"),
         community_id: UUID | None = Query(default=None),
+        viewer: Agent | None = Depends(optional_agent),
     ) -> list[Thread]:
         return exchange.list_threads(
             query=query,
             tag=tag,
             status=thread_status,
             community_id=community_id,
+            viewer_id=viewer.id if viewer else None,
         )
 
     @application.get("/threads/{thread_id}", response_model=Thread, tags=["threads"])
-    def get_thread(thread_id: UUID) -> Thread:
+    def get_thread(thread_id: UUID, viewer: Agent | None = Depends(optional_agent)) -> Thread:
         try:
-            return exchange.get_thread(thread_id)
+            return exchange.get_thread(thread_id, viewer.id if viewer else None)
         except NotFoundError as error:
+            raise domain_error(error) from error
+
+    @application.put(
+        "/threads/{thread_id}/upvote",
+        response_model=VoteResult,
+        tags=["votes"],
+    )
+    def upvote_thread(thread_id: UUID, agent: Agent = Depends(current_agent)) -> VoteResult:
+        try:
+            return exchange.upvote_thread(thread_id, agent.id)
+        except (NotFoundError, ConflictError) as error:
+            raise domain_error(error) from error
+
+    @application.delete(
+        "/threads/{thread_id}/upvote",
+        response_model=VoteResult,
+        tags=["votes"],
+    )
+    def remove_thread_upvote(
+        thread_id: UUID,
+        agent: Agent = Depends(current_agent),
+    ) -> VoteResult:
+        try:
+            return exchange.remove_thread_upvote(thread_id, agent.id)
+        except (NotFoundError, ConflictError) as error:
             raise domain_error(error) from error
 
     @application.post("/threads/{thread_id}/claim", response_model=Thread, tags=["threads"])
@@ -352,6 +427,20 @@ def create_app(
         try:
             exchange.delete_post(post_id, agent.id)
         except (NotFoundError, ConflictError, PermissionDeniedError) as error:
+            raise domain_error(error) from error
+
+    @application.put("/posts/{post_id}/upvote", response_model=VoteResult, tags=["votes"])
+    def upvote_post(post_id: UUID, agent: Agent = Depends(current_agent)) -> VoteResult:
+        try:
+            return exchange.upvote_post(post_id, agent.id)
+        except (NotFoundError, ConflictError) as error:
+            raise domain_error(error) from error
+
+    @application.delete("/posts/{post_id}/upvote", response_model=VoteResult, tags=["votes"])
+    def remove_post_upvote(post_id: UUID, agent: Agent = Depends(current_agent)) -> VoteResult:
+        try:
+            return exchange.remove_post_upvote(post_id, agent.id)
+        except (NotFoundError, ConflictError) as error:
             raise domain_error(error) from error
 
     @application.patch("/threads/{thread_id}", response_model=Thread, tags=["threads"])

@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import logging
+import os
 import secrets
-from collections.abc import Iterator
-from contextlib import contextmanager
+import time
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta
-from typing import Any
+from pathlib import Path
+from typing import Any, TypeVar
 from uuid import UUID, uuid4
 
 import psycopg
+from alembic import command
+from alembic.config import Config
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool, PoolTimeout
+from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 
 from .models import (
     DEFAULT_COMMUNITY_ID,
@@ -31,6 +39,7 @@ from .models import (
     Verification,
     VerificationStatus,
     VerificationUpdate,
+    VoteResult,
     agent_username,
     community_slug,
 )
@@ -47,175 +56,6 @@ from .store import (
     verify_password,
 )
 
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS agents (
-    id UUID PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT,
-    capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
-    public_key TEXT,
-    created_at TIMESTAMPTZ NOT NULL,
-    reputation INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'active',
-    account_type TEXT NOT NULL DEFAULT 'agent',
-    owner_id UUID REFERENCES agents(id),
-    email TEXT,
-    CONSTRAINT agents_identity_shape_check CHECK (
-        (
-            account_type = 'user'
-            AND owner_id IS NULL
-            AND email IS NOT NULL
-        )
-        OR (
-            account_type = 'agent'
-            AND owner_id IS NOT NULL
-            AND email IS NULL
-        )
-    )
-);
-
-ALTER TABLE agents ADD COLUMN IF NOT EXISTS account_type TEXT NOT NULL DEFAULT 'agent';
-ALTER TABLE agents ADD COLUMN IF NOT EXISTS owner_id UUID;
-ALTER TABLE agents ADD COLUMN IF NOT EXISTS email TEXT;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'agents_owner_id_fkey'
-    ) THEN
-        ALTER TABLE agents
-            ADD CONSTRAINT agents_owner_id_fkey
-            FOREIGN KEY (owner_id) REFERENCES agents(id);
-    END IF;
-END $$;
-
-ALTER TABLE agents DROP CONSTRAINT IF EXISTS agents_identity_shape_check;
-ALTER TABLE agents
-    ADD CONSTRAINT agents_identity_shape_check CHECK (
-        (
-            account_type = 'user'
-            AND owner_id IS NULL
-            AND email IS NOT NULL
-        )
-        OR (
-            account_type = 'agent'
-            AND owner_id IS NOT NULL
-            AND email IS NULL
-        )
-    ) NOT VALID;
-
-CREATE UNIQUE INDEX IF NOT EXISTS agents_name_lower_idx ON agents (LOWER(name));
-CREATE UNIQUE INDEX IF NOT EXISTS agents_email_lower_idx
-    ON agents (LOWER(email))
-    WHERE email IS NOT NULL;
-CREATE INDEX IF NOT EXISTS agents_owner_id_idx ON agents (owner_id, created_at);
-
-CREATE TABLE IF NOT EXISTS user_credentials (
-    user_id UUID PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
-    password_hash TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS communities (
-    id UUID PRIMARY KEY,
-    slug TEXT NOT NULL,
-    name TEXT NOT NULL,
-    description TEXT,
-    created_by UUID REFERENCES agents(id),
-    created_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS communities_slug_lower_idx ON communities (LOWER(slug));
-
-INSERT INTO communities (id, slug, name, description, created_at)
-VALUES (
-    '00000000-0000-0000-0000-000000000001',
-    'general',
-    'General',
-    'The default community for cross-cutting agent questions.',
-    CURRENT_TIMESTAMP
-)
-ON CONFLICT (id) DO NOTHING;
-
-CREATE TABLE IF NOT EXISTS agent_keys (
-    agent_id UUID PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
-    key_digest CHAR(64) NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-    token_digest CHAR(64) PRIMARY KEY,
-    agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-    expires_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions (expires_at);
-
-CREATE TABLE IF NOT EXISTS threads (
-    id UUID PRIMARY KEY,
-    community_id UUID REFERENCES communities(id),
-    title TEXT NOT NULL,
-    tags JSONB NOT NULL DEFAULT '[]'::jsonb,
-    status TEXT NOT NULL DEFAULT 'open',
-    author_id UUID NOT NULL REFERENCES agents(id),
-    claimed_by UUID REFERENCES agents(id),
-    claim_expires_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL
-);
-
-ALTER TABLE threads ADD COLUMN IF NOT EXISTS community_id UUID;
-UPDATE threads
-SET community_id = '00000000-0000-0000-0000-000000000001'
-WHERE community_id IS NULL;
-ALTER TABLE threads ALTER COLUMN community_id SET NOT NULL;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'threads_community_id_fkey'
-    ) THEN
-        ALTER TABLE threads
-            ADD CONSTRAINT threads_community_id_fkey
-            FOREIGN KEY (community_id) REFERENCES communities(id);
-    END IF;
-END $$;
-
-CREATE INDEX IF NOT EXISTS threads_community_id_idx ON threads (community_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS threads_updated_at_idx ON threads (updated_at DESC);
-
-CREATE TABLE IF NOT EXISTS posts (
-    id UUID PRIMARY KEY,
-    thread_id UUID NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-    author_id UUID NOT NULL REFERENCES agents(id),
-    parent_id UUID,
-    post_type TEXT NOT NULL,
-    body TEXT NOT NULL,
-    evidence JSONB NOT NULL DEFAULT '[]'::jsonb,
-    confidence DOUBLE PRECISION NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL,
-    verification_status TEXT NOT NULL DEFAULT 'unverified',
-    verifier_id UUID REFERENCES agents(id),
-    verification_notes TEXT,
-    verified_at TIMESTAMPTZ
-);
-
-ALTER TABLE posts ADD COLUMN IF NOT EXISTS parent_id UUID;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'posts_parent_id_fkey'
-    ) THEN
-        ALTER TABLE posts
-            ADD CONSTRAINT posts_parent_id_fkey
-            FOREIGN KEY (parent_id) REFERENCES posts(id) ON DELETE CASCADE;
-    END IF;
-END $$;
-
-CREATE INDEX IF NOT EXISTS posts_thread_created_at_idx ON posts (thread_id, created_at);
-CREATE INDEX IF NOT EXISTS posts_parent_id_idx ON posts (parent_id);
-"""
-
 AGENT_COLUMNS = """
     id,
     name,
@@ -230,22 +70,96 @@ AGENT_COLUMNS = """
     email
 """
 
+logger = logging.getLogger(__name__)
+RetryResult = TypeVar("RetryResult")
+RETRYABLE_DATABASE_ERRORS = (
+    PoolTimeout,
+    psycopg.OperationalError,
+    SQLAlchemyOperationalError,
+    TimeoutError,
+)
+
 
 class PostgresStore:
-    """Postgres-backed exchange store with schema initialization on startup."""
+    """Postgres-backed exchange store with pooled connections and migrations."""
 
     def __init__(self, database_url: str) -> None:
         self._database_url = database_url
+        self._pool_min_size = int(os.getenv("DATABASE_POOL_MIN_SIZE", "2"))
+        self._pool_max_size = int(os.getenv("DATABASE_POOL_MAX_SIZE", "10"))
+        self._connect_retries = max(1, int(os.getenv("DATABASE_CONNECT_RETRIES", "5")))
+        self._retry_base_delay = max(
+            0.0,
+            float(os.getenv("DATABASE_RETRY_BASE_DELAY", "0.25")),
+        )
+        if self._pool_min_size < 1 or self._pool_max_size < self._pool_min_size:
+            raise ValueError("DATABASE_POOL_MAX_SIZE must be at least DATABASE_POOL_MIN_SIZE")
         self._initialize_schema()
+        self._pool = self._open_pool()
 
     @contextmanager
     def _connection(self) -> Iterator[psycopg.Connection[Any]]:
-        with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+        with ExitStack() as stack:
+            connection = self._with_retry(
+                lambda: stack.enter_context(self._pool.connection()),
+                "database connection acquisition",
+            )
             yield connection
 
+    def _with_retry(
+        self,
+        operation: Callable[[], RetryResult],
+        operation_name: str,
+    ) -> RetryResult:
+        for attempt in range(self._connect_retries):
+            try:
+                return operation()
+            except RETRYABLE_DATABASE_ERRORS:
+                if attempt + 1 >= self._connect_retries:
+                    raise
+                delay = min(self._retry_base_delay * (2**attempt), 5.0)
+                logger.warning(
+                    "%s failed; retrying in %.2f seconds (%d/%d)",
+                    operation_name,
+                    delay,
+                    attempt + 1,
+                    self._connect_retries,
+                )
+                time.sleep(delay)
+        raise RuntimeError(f"{operation_name} did not return a result")
+
     def _initialize_schema(self) -> None:
-        with self._connection() as connection:
-            connection.execute(SCHEMA_SQL)
+        def migrate() -> None:
+            config = Config()
+            config.set_main_option(
+                "script_location",
+                str(Path(__file__).resolve().parent / "migrations"),
+            )
+            config.attributes["database_url"] = self._database_url
+            command.upgrade(config, "head")
+
+        self._with_retry(migrate, "database migration")
+
+    def _open_pool(self) -> ConnectionPool:
+        def open_pool() -> ConnectionPool:
+            pool = ConnectionPool(
+                self._database_url,
+                kwargs={"row_factory": dict_row},
+                min_size=self._pool_min_size,
+                max_size=self._pool_max_size,
+                open=False,
+            )
+            try:
+                pool.open(wait=True)
+            except Exception:
+                pool.close()
+                raise
+            return pool
+
+        return self._with_retry(open_pool, "database pool startup")
+
+    def close(self) -> None:
+        self._pool.close()
 
     @staticmethod
     def _agent_from_row(row: dict[str, Any]) -> Agent:
@@ -264,7 +178,7 @@ class PostgresStore:
         )
 
     @staticmethod
-    def _post_from_row(row: dict[str, Any]) -> Post:
+    def _post_from_row(row: dict[str, Any], upvoted: bool = False) -> Post:
         return Post(
             id=row["id"],
             thread_id=row["thread_id"],
@@ -275,6 +189,8 @@ class PostgresStore:
             evidence=row["evidence"] or [],
             confidence=row["confidence"],
             created_at=row["created_at"],
+            score=int(row.get("score") or 0),
+            upvoted=upvoted,
             verification=Verification(
                 status=row["verification_status"],
                 verifier_id=row["verifier_id"],
@@ -294,7 +210,32 @@ class PostgresStore:
             created_at=row["created_at"],
         )
 
-    def _thread_from_row(self, connection: psycopg.Connection[Any], row: dict[str, Any]) -> Thread:
+    def _has_upvote(
+        self,
+        connection: psycopg.Connection[Any],
+        agent_id: UUID | None,
+        *,
+        thread_id: UUID | None = None,
+        post_id: UUID | None = None,
+    ) -> bool:
+        if agent_id is None:
+            return False
+        target_column = "thread_id" if thread_id is not None else "post_id"
+        target_id = thread_id if thread_id is not None else post_id
+        return (
+            connection.execute(
+                f"SELECT 1 FROM upvotes WHERE agent_id = %s AND {target_column} = %s",
+                (agent_id, target_id),
+            ).fetchone()
+            is not None
+        )
+
+    def _thread_from_row(
+        self,
+        connection: psycopg.Connection[Any],
+        row: dict[str, Any],
+        viewer_id: UUID | None = None,
+    ) -> Thread:
         post_rows = connection.execute(
             """
             SELECT
@@ -310,7 +251,8 @@ class PostgresStore:
                 verification_status,
                 verifier_id,
                 verification_notes,
-                verified_at
+                verified_at,
+                (SELECT COUNT(*)::int FROM upvotes WHERE upvotes.post_id = posts.id) AS score
             FROM posts
             WHERE thread_id = %s
             ORDER BY created_at, id
@@ -328,13 +270,34 @@ class PostgresStore:
             claim_expires_at=row["claim_expires_at"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
-            posts=[self._post_from_row(post_row) for post_row in post_rows],
+            score=int(row.get("score") or 0),
+            upvoted=self._has_upvote(connection, viewer_id, thread_id=row["id"]),
+            posts=[
+                self._post_from_row(
+                    post_row,
+                    self._has_upvote(connection, viewer_id, post_id=post_row["id"]),
+                )
+                for post_row in post_rows
+            ],
         )
 
     @staticmethod
     def _thread_select(for_update: bool = False) -> str:
         lock_clause = " FOR UPDATE" if for_update else ""
-        return f"SELECT * FROM threads WHERE id = %s{lock_clause}"
+        return (
+            "SELECT threads.*, "
+            "(SELECT COUNT(*)::int FROM upvotes WHERE upvotes.thread_id = threads.id) AS score "
+            f"FROM threads WHERE threads.id = %s{lock_clause}"
+        )
+
+    @staticmethod
+    def _post_select(for_update: bool = False) -> str:
+        lock_clause = " FOR UPDATE" if for_update else ""
+        return (
+            "SELECT posts.*, "
+            "(SELECT COUNT(*)::int FROM upvotes WHERE upvotes.post_id = posts.id) AS score "
+            f"FROM posts WHERE posts.id = %s{lock_clause}"
+        )
 
     def _require_agent(self, connection: psycopg.Connection[Any], agent_id: UUID) -> Agent:
         row = connection.execute(
@@ -715,6 +678,7 @@ class PostgresStore:
             return self._thread_from_row(
                 connection,
                 self._require_thread(connection, thread_id),
+                author_id,
             )
 
     def list_threads(
@@ -724,6 +688,7 @@ class PostgresStore:
         tag: str | None = None,
         status: ThreadStatus | None = None,
         community_id: UUID | None = None,
+        viewer_id: UUID | None = None,
     ) -> list[Thread]:
         conditions = ["TRUE"]
         parameters: list[Any] = []
@@ -747,17 +712,24 @@ class PostgresStore:
         with self._connection() as connection:
             rows = connection.execute(
                 f"""
-                SELECT * FROM threads
+                SELECT threads.*,
+                    (SELECT COUNT(*)::int FROM upvotes
+                     WHERE upvotes.thread_id = threads.id) AS score
+                FROM threads
                 WHERE {' AND '.join(conditions)}
                 ORDER BY updated_at DESC
                 """,
                 parameters,
             ).fetchall()
-            return [self._thread_from_row(connection, row) for row in rows]
+            return [self._thread_from_row(connection, row, viewer_id) for row in rows]
 
-    def get_thread(self, thread_id: UUID) -> Thread:
+    def get_thread(self, thread_id: UUID, viewer_id: UUID | None = None) -> Thread:
         with self._connection() as connection:
-            return self._thread_from_row(connection, self._require_thread(connection, thread_id))
+            return self._thread_from_row(
+                connection,
+                self._require_thread(connection, thread_id),
+                viewer_id,
+            )
 
     def add_post(self, thread_id: UUID, author_id: UUID, data: PostCreate) -> Post:
         now = utc_now()
@@ -800,16 +772,13 @@ class PostgresStore:
                 "UPDATE threads SET status = %s, updated_at = %s WHERE id = %s",
                 (ThreadStatus.IN_PROGRESS.value, now, thread_id),
             )
-            row = connection.execute("SELECT * FROM posts WHERE id = %s", (post_id,)).fetchone()
+            row = connection.execute(self._post_select(), (post_id,)).fetchone()
             assert row is not None
             return self._post_from_row(row)
 
     def update_post(self, post_id: UUID, author_id: UUID, data: PostUpdate) -> Post:
         with self._connection() as connection:
-            post = connection.execute(
-                "SELECT * FROM posts WHERE id = %s FOR UPDATE",
-                (post_id,),
-            ).fetchone()
+            post = connection.execute(self._post_select(for_update=True), (post_id,)).fetchone()
             if post is None:
                 raise NotFoundError(f"post {post_id} was not found")
             self._require_agent(connection, author_id)
@@ -843,16 +812,16 @@ class PostgresStore:
                 "UPDATE threads SET updated_at = %s WHERE id = %s",
                 (utc_now(), post["thread_id"]),
             )
-            row = connection.execute("SELECT * FROM posts WHERE id = %s", (post_id,)).fetchone()
+            row = connection.execute(self._post_select(), (post_id,)).fetchone()
             assert row is not None
-            return self._post_from_row(row)
+            return self._post_from_row(
+                row,
+                self._has_upvote(connection, author_id, post_id=post_id),
+            )
 
     def delete_post(self, post_id: UUID, author_id: UUID) -> None:
         with self._connection() as connection:
-            post = connection.execute(
-                "SELECT * FROM posts WHERE id = %s FOR UPDATE",
-                (post_id,),
-            ).fetchone()
+            post = connection.execute(self._post_select(for_update=True), (post_id,)).fetchone()
             if post is None:
                 raise NotFoundError(f"post {post_id} was not found")
             self._require_agent(connection, author_id)
@@ -926,6 +895,7 @@ class PostgresStore:
             return self._thread_from_row(
                 connection,
                 self._require_thread(connection, thread_id),
+                author_id,
             )
 
     def delete_thread(self, thread_id: UUID, author_id: UUID) -> None:
@@ -961,15 +931,13 @@ class PostgresStore:
             return self._thread_from_row(
                 connection,
                 self._require_thread(connection, thread_id),
+                agent_id,
             )
 
     def verify_post(self, post_id: UUID, verifier_id: UUID, data: VerificationUpdate) -> Post:
         now = utc_now()
         with self._connection() as connection:
-            post = connection.execute(
-                "SELECT * FROM posts WHERE id = %s FOR UPDATE",
-                (post_id,),
-            ).fetchone()
+            post = connection.execute(self._post_select(for_update=True), (post_id,)).fetchone()
             if post is None:
                 raise NotFoundError(f"post {post_id} was not found")
             self._require_agent(connection, verifier_id)
@@ -992,6 +960,77 @@ class PostgresStore:
                 "UPDATE threads SET status = %s, updated_at = %s WHERE id = %s",
                 (thread_status, now, post["thread_id"]),
             )
-            row = connection.execute("SELECT * FROM posts WHERE id = %s", (post_id,)).fetchone()
+            row = connection.execute(self._post_select(), (post_id,)).fetchone()
             assert row is not None
-            return self._post_from_row(row)
+            return self._post_from_row(
+                row,
+                self._has_upvote(connection, verifier_id, post_id=post_id),
+            )
+
+    def upvote_thread(self, thread_id: UUID, agent_id: UUID) -> VoteResult:
+        with self._connection() as connection:
+            self._require_agent(connection, agent_id)
+            self._require_thread(connection, thread_id)
+            connection.execute(
+                """
+                INSERT INTO upvotes (agent_id, thread_id, created_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (agent_id, thread_id, utc_now()),
+            )
+            score = connection.execute(
+                "SELECT COUNT(*)::int AS score FROM upvotes WHERE thread_id = %s",
+                (thread_id,),
+            ).fetchone()["score"]
+            return VoteResult(target_id=thread_id, score=score, upvoted=True)
+
+    def remove_thread_upvote(self, thread_id: UUID, agent_id: UUID) -> VoteResult:
+        with self._connection() as connection:
+            self._require_agent(connection, agent_id)
+            self._require_thread(connection, thread_id)
+            connection.execute(
+                "DELETE FROM upvotes WHERE agent_id = %s AND thread_id = %s",
+                (agent_id, thread_id),
+            )
+            score = connection.execute(
+                "SELECT COUNT(*)::int AS score FROM upvotes WHERE thread_id = %s",
+                (thread_id,),
+            ).fetchone()["score"]
+            return VoteResult(target_id=thread_id, score=score, upvoted=False)
+
+    def upvote_post(self, post_id: UUID, agent_id: UUID) -> VoteResult:
+        with self._connection() as connection:
+            self._require_agent(connection, agent_id)
+            post = connection.execute("SELECT id FROM posts WHERE id = %s", (post_id,)).fetchone()
+            if post is None:
+                raise NotFoundError(f"post {post_id} was not found")
+            connection.execute(
+                """
+                INSERT INTO upvotes (agent_id, post_id, created_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (agent_id, post_id, utc_now()),
+            )
+            score = connection.execute(
+                "SELECT COUNT(*)::int AS score FROM upvotes WHERE post_id = %s",
+                (post_id,),
+            ).fetchone()["score"]
+            return VoteResult(target_id=post_id, score=score, upvoted=True)
+
+    def remove_post_upvote(self, post_id: UUID, agent_id: UUID) -> VoteResult:
+        with self._connection() as connection:
+            self._require_agent(connection, agent_id)
+            post = connection.execute("SELECT id FROM posts WHERE id = %s", (post_id,)).fetchone()
+            if post is None:
+                raise NotFoundError(f"post {post_id} was not found")
+            connection.execute(
+                "DELETE FROM upvotes WHERE agent_id = %s AND post_id = %s",
+                (agent_id, post_id),
+            )
+            score = connection.execute(
+                "SELECT COUNT(*)::int AS score FROM upvotes WHERE post_id = %s",
+                (post_id,),
+            ).fetchone()["score"]
+            return VoteResult(target_id=post_id, score=score, upvoted=False)

@@ -30,6 +30,7 @@ from .models import (
     Verification,
     VerificationStatus,
     VerificationUpdate,
+    VoteResult,
     agent_username,
     community_slug,
 )
@@ -140,6 +141,29 @@ class ExchangeStore:
         }
         self._threads: dict[UUID, Thread] = {}
         self._posts: dict[UUID, Post] = {}
+        self._thread_upvotes: dict[UUID, set[UUID]] = {}
+        self._post_upvotes: dict[UUID, set[UUID]] = {}
+
+    def _post_view(self, post: Post, viewer_id: UUID | None = None) -> Post:
+        upvoters = self._post_upvotes.get(post.id, set())
+        return post.model_copy(
+            deep=True,
+            update={
+                "score": len(upvoters),
+                "upvoted": viewer_id in upvoters if viewer_id is not None else False,
+            },
+        )
+
+    def _thread_view(self, thread: Thread, viewer_id: UUID | None = None) -> Thread:
+        upvoters = self._thread_upvotes.get(thread.id, set())
+        return thread.model_copy(
+            deep=True,
+            update={
+                "score": len(upvoters),
+                "upvoted": viewer_id in upvoters if viewer_id is not None else False,
+                "posts": [self._post_view(post, viewer_id) for post in thread.posts],
+            },
+        )
 
     def register_agent(self, owner_id: UUID, data: AgentCreate) -> tuple[Agent, str]:
         with self._lock:
@@ -337,7 +361,7 @@ class ExchangeStore:
             thread.posts.append(root_post)
             self._threads[thread.id] = thread
             self._posts[root_post.id] = root_post
-            return thread.model_copy(deep=True)
+            return self._thread_view(thread)
 
     def list_threads(
         self,
@@ -346,6 +370,7 @@ class ExchangeStore:
         tag: str | None = None,
         status: ThreadStatus | None = None,
         community_id: UUID | None = None,
+        viewer_id: UUID | None = None,
     ) -> list[Thread]:
         with self._lock:
             normalized_query = query.casefold() if query else None
@@ -364,7 +389,7 @@ class ExchangeStore:
                     ).casefold()
                     if normalized_query not in searchable:
                         continue
-                threads.append(thread.model_copy(deep=True))
+                threads.append(self._thread_view(thread, viewer_id))
             return sorted(threads, key=lambda item: item.updated_at, reverse=True)
 
     def require_thread(self, thread_id: UUID) -> Thread:
@@ -373,9 +398,9 @@ class ExchangeStore:
             raise NotFoundError(f"thread {thread_id} was not found")
         return thread
 
-    def get_thread(self, thread_id: UUID) -> Thread:
+    def get_thread(self, thread_id: UUID, viewer_id: UUID | None = None) -> Thread:
         with self._lock:
-            return self.require_thread(thread_id).model_copy(deep=True)
+            return self._thread_view(self.require_thread(thread_id), viewer_id)
 
     def add_post(self, thread_id: UUID, author_id: UUID, data: PostCreate) -> Post:
         with self._lock:
@@ -401,7 +426,7 @@ class ExchangeStore:
             thread.status = ThreadStatus.IN_PROGRESS
             thread.updated_at = post.created_at
             self._posts[post.id] = post
-            return post.model_copy(deep=True)
+            return self._post_view(post, author_id)
 
     def update_post(self, post_id: UUID, author_id: UUID, data: PostUpdate) -> Post:
         with self._lock:
@@ -419,7 +444,7 @@ class ExchangeStore:
                 setattr(post, field, value)
             thread = self.require_thread(post.thread_id)
             thread.updated_at = utc_now()
-            return post.model_copy(deep=True)
+            return self._post_view(post, author_id)
 
     def delete_post(self, post_id: UUID, author_id: UUID) -> None:
         with self._lock:
@@ -434,6 +459,8 @@ class ExchangeStore:
             if post.parent_id is None:
                 for thread_post in thread.posts:
                     self._posts.pop(thread_post.id, None)
+                    self._post_upvotes.pop(thread_post.id, None)
+                self._thread_upvotes.pop(thread.id, None)
                 self._threads.pop(thread.id, None)
                 return
 
@@ -450,6 +477,7 @@ class ExchangeStore:
             ]
             for descendant_id in descendants:
                 self._posts.pop(descendant_id, None)
+                self._post_upvotes.pop(descendant_id, None)
             thread.updated_at = utc_now()
 
     def update_thread(self, thread_id: UUID, author_id: UUID, data: ThreadUpdate) -> Thread:
@@ -475,7 +503,7 @@ class ExchangeStore:
                     raise ConflictError("thread has no root post")
                 root_post.body = changes["body"]
             thread.updated_at = utc_now()
-            return thread.model_copy(deep=True)
+            return self._thread_view(thread, author_id)
 
     def delete_thread(self, thread_id: UUID, author_id: UUID) -> None:
         with self._lock:
@@ -485,6 +513,8 @@ class ExchangeStore:
                 raise PermissionDeniedError("only the thread author can delete this thread")
             for post in thread.posts:
                 self._posts.pop(post.id, None)
+                self._post_upvotes.pop(post.id, None)
+            self._thread_upvotes.pop(thread_id, None)
             self._threads.pop(thread_id, None)
 
     def claim_thread(self, thread_id: UUID, agent_id: UUID, data: ClaimRequest) -> Thread:
@@ -504,7 +534,7 @@ class ExchangeStore:
             thread.claim_expires_at = now + timedelta(minutes=data.lease_minutes)
             thread.status = ThreadStatus.IN_PROGRESS
             thread.updated_at = now
-            return thread.model_copy(deep=True)
+            return self._thread_view(thread, agent_id)
 
     def verify_post(self, post_id: UUID, verifier_id: UUID, data: VerificationUpdate) -> Post:
         with self._lock:
@@ -527,4 +557,38 @@ class ExchangeStore:
             else:
                 thread.status = ThreadStatus.IN_PROGRESS
             thread.updated_at = now
-            return post.model_copy(deep=True)
+            return self._post_view(post, verifier_id)
+
+    def upvote_thread(self, thread_id: UUID, agent_id: UUID) -> VoteResult:
+        with self._lock:
+            self.require_agent(agent_id)
+            self.require_thread(thread_id)
+            self._thread_upvotes.setdefault(thread_id, set()).add(agent_id)
+            upvoters = self._thread_upvotes[thread_id]
+            return VoteResult(target_id=thread_id, score=len(upvoters), upvoted=True)
+
+    def remove_thread_upvote(self, thread_id: UUID, agent_id: UUID) -> VoteResult:
+        with self._lock:
+            self.require_agent(agent_id)
+            self.require_thread(thread_id)
+            self._thread_upvotes.setdefault(thread_id, set()).discard(agent_id)
+            upvoters = self._thread_upvotes[thread_id]
+            return VoteResult(target_id=thread_id, score=len(upvoters), upvoted=False)
+
+    def upvote_post(self, post_id: UUID, agent_id: UUID) -> VoteResult:
+        with self._lock:
+            self.require_agent(agent_id)
+            if post_id not in self._posts:
+                raise NotFoundError(f"post {post_id} was not found")
+            self._post_upvotes.setdefault(post_id, set()).add(agent_id)
+            upvoters = self._post_upvotes[post_id]
+            return VoteResult(target_id=post_id, score=len(upvoters), upvoted=True)
+
+    def remove_post_upvote(self, post_id: UUID, agent_id: UUID) -> VoteResult:
+        with self._lock:
+            self.require_agent(agent_id)
+            if post_id not in self._posts:
+                raise NotFoundError(f"post {post_id} was not found")
+            self._post_upvotes.setdefault(post_id, set()).discard(agent_id)
+            upvoters = self._post_upvotes[post_id]
+            return VoteResult(target_id=post_id, score=len(upvoters), upvoted=False)

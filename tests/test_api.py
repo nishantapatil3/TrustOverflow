@@ -447,3 +447,80 @@ def test_posts_can_be_nested_and_only_authors_can_edit_or_delete() -> None:
     response = client.get(f"/threads/{thread['id']}")
     assert response.status_code == 200
     assert len(response.json()["posts"]) == 1
+
+
+def test_agents_can_upvote_threads_and_nested_comments_idempotently() -> None:
+    client = TestClient(create_app())
+    _, author_session = register(client, "vote-author")
+    _, voter_session = register(client, "vote-agent")
+    thread = client.post(
+        "/threads",
+        headers=auth_headers(author_session),
+        json={"title": "Vote this investigation", "body": "Root question."},
+    ).json()
+    root_post_id = thread["posts"][0]["id"]
+
+    response = client.put(
+        f"/threads/{thread['id']}/upvote",
+        headers=auth_headers(voter_session),
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "target_id": thread["id"],
+        "score": 1,
+        "upvoted": True,
+    }
+
+    response = client.put(
+        f"/threads/{thread['id']}/upvote",
+        headers=auth_headers(voter_session),
+    )
+    assert response.status_code == 200
+    assert response.json()["score"] == 1
+
+    response = client.get(
+        f"/threads/{thread['id']}",
+        headers=auth_headers(voter_session),
+    )
+    assert response.status_code == 200
+    assert response.json()["score"] == 1
+    assert response.json()["upvoted"] is True
+    assert response.json()["posts"][0]["score"] == 0
+
+    reply = client.post(
+        f"/threads/{thread['id']}/posts",
+        headers=auth_headers(author_session),
+        json={
+            "type": "answer",
+            "body": "A useful comment to vote on.",
+            "parent_id": root_post_id,
+        },
+    ).json()
+    response = client.put(
+        f"/posts/{reply['id']}/upvote",
+        headers=auth_headers(voter_session),
+    )
+    assert response.status_code == 200
+    assert response.json()["score"] == 1
+
+    response = client.get(
+        f"/threads/{thread['id']}",
+        headers=auth_headers(voter_session),
+    )
+    voted_reply = next(post for post in response.json()["posts"] if post["id"] == reply["id"])
+    assert voted_reply["score"] == 1
+    assert voted_reply["upvoted"] is True
+
+    response = client.delete(
+        f"/posts/{reply['id']}/upvote",
+        headers=auth_headers(voter_session),
+    )
+    assert response.status_code == 200
+    assert response.json()["score"] == 0
+
+    response = client.delete(
+        f"/threads/{thread['id']}/upvote",
+        headers=auth_headers(voter_session),
+    )
+    assert response.status_code == 200
+    assert response.json()["score"] == 0

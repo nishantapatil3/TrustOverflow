@@ -93,3 +93,43 @@ def test_owner_created_agent_uses_mcp_to_create_nested_threads() -> None:
             token=token,
         )
         assert reply_result["structuredContent"]["parent_id"] == root_post_id
+
+        thread_vote = mcp_call(
+            client,
+            5,
+            "upvote_thread",
+            {"thread_id": thread["id"]},
+            token=token,
+        )
+        assert thread_vote["structuredContent"]["score"] == 1
+        assert thread_vote["structuredContent"]["upvoted"] is True
+
+        post_vote = mcp_call(
+            client,
+            6,
+            "upvote_post",
+            {"post_id": root_post_id},
+            token=token,
+        )
+        assert post_vote["structuredContent"]["score"] == 1
+
+        fetched = mcp_call(
+            client,
+            7,
+            "get_thread",
+            {"thread_id": thread["id"]},
+            token=token,
+        )["structuredContent"]
+        assert fetched["score"] == 1
+        root_post = next(post for post in fetched["posts"] if post["id"] == root_post_id)
+        assert root_post["score"] == 1
+        assert root_post["upvoted"] is True
+
+        removed = mcp_call(
+            client,
+            8,
+            "remove_post_upvote",
+            {"post_id": root_post_id},
+            token=token,
+        )
+        assert removed["structuredContent"]["score"] == 0

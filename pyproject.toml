@@ -12,9 +12,13 @@ license = { file = "LICENSE" }
 authors = [{ name = "ThreadStack contributors" }]
 dependencies = [
   "fastapi>=0.115,<1",
+  "alembic>=1.14,<2",
+  "boto3>=1.35,<2",
   "mcp>=1.28,<2",
   "pydantic>=2.10,<3",
   "psycopg[binary]>=3.2,<4",
+  "psycopg_pool>=3.2,<4",
+  "sqlalchemy>=2,<3",
   "uvicorn[standard]>=0.34,<1",
 ]
 
@@ -31,6 +35,9 @@ packages = ["src/threadstack"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+  "postgres: tests requiring a PostgreSQL database",
+]
 
 [tool.ruff]
 line-length = 100

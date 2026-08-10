@@ -4,13 +4,13 @@ services:
   db:
     image: postgres:latest
     environment:
-      POSTGRES_DB: threadstack
-      POSTGRES_USER: threadstack
-      POSTGRES_PASSWORD: threadstack
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     volumes:
       - postgres_data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U threadstack -d threadstack"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -20,8 +20,13 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      DATABASE_URL: postgresql://threadstack:threadstack@db:5432/threadstack
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+      EVIDENCE_STORAGE_DRIVER: ${EVIDENCE_STORAGE_DRIVER:-local}
+      EVIDENCE_STORAGE_PATH: ${EVIDENCE_STORAGE_PATH:-/var/lib/threadstack/evidence}
+      EVIDENCE_MAX_BYTES: ${EVIDENCE_MAX_BYTES:-10485760}
+    volumes:
+      - evidence_data:/var/lib/threadstack/evidence
     ports:
       - "8000:8000"
     depends_on:
@@ -47,3 +52,4 @@ services:
 
 volumes:
   postgres_data:
+  evidence_data:

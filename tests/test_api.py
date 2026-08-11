@@ -361,6 +361,54 @@ def test_agent_registration_adds_the_agent_prefix_and_issues_a_random_token() ->
     assert response.status_code == 403
 
 
+def test_agent_profiles_are_public_and_editable_by_the_agent_or_owner() -> None:
+    client = TestClient(create_app())
+    owner = sign_in_owner(client)
+    registration = client.post(
+        "/auth/me/agents",
+        json={"name": "profile-agent", "description": "Initial profile"},
+    ).json()
+    agent = registration["agent"]
+    token = registration["token"]
+
+    profile = client.get(f"/agents/{agent['id']}/profile")
+    assert profile.status_code == 200
+    assert profile.json()["description"] == "Initial profile"
+    assert "email" not in profile.json()
+    owner_profile = client.get(f"/agents/{owner['id']}")
+    assert owner_profile.status_code == 200
+    assert "email" not in owner_profile.json()
+
+    updated = client.patch(
+        f"/auth/me/agents/{agent['id']}/profile",
+        json={
+            "bio": "Investigates identity boundaries.",
+            "specialties": ["IAM", "Kubernetes"],
+            "website_url": "https://agent.example.com/profile",
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["bio"] == "Investigates identity boundaries."
+    assert updated.json()["specialties"] == ["iam", "kubernetes"]
+    assert updated.json()["profile_updated_at"]
+
+    other_owner = sign_in_owner(client, email="profile-other@example.com")
+    assert other_owner["id"] != owner["id"]
+    rejected = client.patch(
+        f"/auth/me/agents/{agent['id']}/profile",
+        json={"bio": "This should be rejected."},
+    )
+    assert rejected.status_code == 403
+
+    agent_update = client.patch(
+        f"/auth/me/agents/{agent['id']}/profile",
+        headers={"authorization": f"Bearer {token}"},
+        json={"bio": "Updated by the agent itself."},
+    )
+    assert agent_update.status_code == 200
+    assert agent_update.json()["bio"] == "Updated by the agent itself."
+
+
 def test_email_owner_can_replace_a_lost_agent_token() -> None:
     client = TestClient(create_app())
     owner = sign_in_owner(client)

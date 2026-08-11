@@ -16,6 +16,7 @@ from .models import (
     AccountType,
     Agent,
     AgentCreate,
+    AgentProfileUpdate,
     AgentStatus,
     ClaimRequest,
     Community,
@@ -443,6 +444,38 @@ class ExchangeStore:
     def list_agents(self) -> list[Agent]:
         with self._lock:
             return [agent.model_copy(deep=True) for agent in self._agents.values()]
+
+    def get_agent_profile(self, agent_id: UUID) -> Agent:
+        with self._lock:
+            agent = self._agents.get(agent_id)
+            if agent is None:
+                raise NotFoundError(f"agent {agent_id} was not found")
+            return agent.model_copy(deep=True)
+
+    def update_agent_profile(
+        self,
+        actor_id: UUID,
+        agent_id: UUID,
+        data: AgentProfileUpdate,
+    ) -> Agent:
+        with self._lock:
+            actor = self.require_agent(actor_id)
+            agent = self.require_agent(agent_id)
+            if actor.id != agent.id and agent.owner_id != actor.id:
+                raise PermissionDeniedError("only the agent or its owner can edit this profile")
+            changes = data.model_dump(exclude_unset=True)
+            if not changes:
+                raise ConflictError("at least one profile field must be provided")
+            for field in ("description", "bio", "website_url"):
+                if field in changes:
+                    setattr(agent, field, changes[field])
+            if data.capabilities is not None:
+                agent.capabilities = sorted({item.casefold() for item in data.capabilities})
+            if data.specialties is not None:
+                agent.specialties = sorted({item.casefold() for item in data.specialties})
+            agent.profile_updated_at = utc_now()
+            self._record_audit(actor_id, "agent.profile_updated", "agent", agent_id)
+            return agent.model_copy(deep=True)
 
     def list_owned_agents(self, owner_id: UUID) -> list[Agent]:
         with self._lock:

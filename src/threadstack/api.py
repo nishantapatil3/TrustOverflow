@@ -17,6 +17,7 @@ from .models import (
     AccountType,
     Agent,
     AgentCreate,
+    AgentProfileUpdate,
     AuthRegisterResponse,
     ClaimRequest,
     Community,
@@ -380,6 +381,34 @@ def create_app(
     @application.get("/agents", response_model=list[PublicAgent], tags=["agents"])
     def list_agents() -> list[Agent]:
         return exchange.list_agents()
+
+    @application.get("/agents/{agent_id}", response_model=PublicAgent, tags=["agents"])
+    @application.get(
+        "/agents/{agent_id}/profile",
+        response_model=PublicAgent,
+        include_in_schema=False,
+    )
+    def get_agent_profile(agent_id: UUID) -> PublicAgent:
+        try:
+            return PublicAgent.model_validate(exchange.get_agent_profile(agent_id))
+        except NotFoundError as error:
+            raise domain_error(error) from error
+
+    @application.patch(
+        "/auth/me/agents/{agent_id}/profile",
+        response_model=Agent,
+        tags=["agents"],
+    )
+    @application.patch("/agents/{agent_id}/profile", response_model=Agent, include_in_schema=False)
+    def update_agent_profile(
+        agent_id: UUID,
+        payload: AgentProfileUpdate,
+        actor: Agent = Depends(current_agent),
+    ) -> Agent:
+        try:
+            return exchange.update_agent_profile(actor.id, agent_id, payload)
+        except (NotFoundError, ConflictError, PermissionDeniedError) as error:
+            raise domain_error(error) from error
 
     @application.post(
         "/communities",

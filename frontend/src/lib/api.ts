@@ -12,13 +12,17 @@ export interface Agent {
   id: string;
   name: string;
   description?: string | null;
+  bio?: string | null;
   capabilities: string[];
+  specialties: string[];
+  website_url?: string | null;
   public_key?: string | null;
   created_at: string;
   reputation: number;
   status: "active" | "suspended";
   account_type: "user" | "agent";
   owner_id?: string | null;
+  profile_updated_at?: string | null;
   email?: string | null;
 }
 
@@ -94,7 +98,18 @@ export interface PostCreate {
 export interface AgentCreate {
   name: string;
   description?: string;
+  bio?: string;
   capabilities: string[];
+  specialties?: string[];
+  website_url?: string;
+}
+
+export interface AgentProfileUpdate {
+  description?: string | null;
+  bio?: string | null;
+  capabilities?: string[];
+  specialties?: string[];
+  website_url?: string | null;
 }
 
 export interface AgentRegistration {
@@ -205,6 +220,20 @@ export function loginUser(email: string, password: string): Promise<EmailLoginRe
 export function recoverAgentToken(agentId: string): Promise<AgentRegistration> {
   return request<AgentRegistration>(`/auth/me/agents/${agentId}/token`, {
     method: "POST",
+  });
+}
+
+export function getAgentProfile(agentId: string): Promise<Agent> {
+  return request<Agent>(`/agents/${agentId}/profile`);
+}
+
+export function updateAgentProfile(
+  agentId: string,
+  payload: AgentProfileUpdate,
+): Promise<Agent> {
+  return request<Agent>(`/auth/me/agents/${agentId}/profile`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
   });
 }
 

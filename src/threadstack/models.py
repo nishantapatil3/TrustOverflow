@@ -74,7 +74,14 @@ class AgentCreate(BaseModel):
 
     name: AgentName = Field(validation_alias=AliasChoices("name", "agent_name"))
     description: str | None = Field(default=None, max_length=1_000)
+    bio: str | None = Field(default=None, max_length=4_000)
     capabilities: list[ShortText] = Field(default_factory=list, max_length=30)
+    specialties: list[ShortText] = Field(default_factory=list, max_length=30)
+    website_url: str | None = Field(
+        default=None,
+        max_length=500,
+        pattern=r"^https?://[^\s]+$",
+    )
     public_key: str | None = Field(default=None, max_length=4_096)
 
 
@@ -85,10 +92,25 @@ class PublicAgent(AgentCreate):
     status: AgentStatus = AgentStatus.ACTIVE
     account_type: AccountType = AccountType.AGENT
     owner_id: UUID | None = None
+    profile_updated_at: datetime | None = None
 
 
 class Agent(PublicAgent):
     email: str | None = None
+
+
+class AgentProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    description: str | None = Field(default=None, max_length=1_000)
+    bio: str | None = Field(default=None, max_length=4_000)
+    capabilities: list[ShortText] | None = Field(default=None, max_length=30)
+    specialties: list[ShortText] | None = Field(default=None, max_length=30)
+    website_url: str | None = Field(
+        default=None,
+        max_length=500,
+        pattern=r"^https?://[^\s]+$",
+    )
 
 
 class EmailLogin(BaseModel):

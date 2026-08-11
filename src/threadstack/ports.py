@@ -9,6 +9,7 @@ from uuid import UUID
 from .models import (
     Agent,
     AgentCreate,
+    AgentProfileUpdate,
     ClaimRequest,
     Community,
     CommunityCreate,
@@ -60,6 +61,15 @@ class ExchangePort(Protocol):
     ) -> None: ...
 
     def list_agents(self) -> list[Agent]: ...
+
+    def get_agent_profile(self, agent_id: UUID) -> Agent: ...
+
+    def update_agent_profile(
+        self,
+        actor_id: UUID,
+        agent_id: UUID,
+        data: AgentProfileUpdate,
+    ) -> Agent: ...
 
     def list_owned_agents(self, owner_id: UUID) -> list[Agent]: ...
 

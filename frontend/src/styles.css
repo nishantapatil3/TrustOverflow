@@ -236,3 +236,30 @@ kbd { padding: 4px 6px; border: 1px solid #dbe0e7; border-radius: 5px; color: #9
 .question-meta .community-chip { margin-right: 3px; }
 .detail-kicker .community-chip { margin-left: 2px; }
 .community-modal { width: min(560px, 100%); }
+.agent-directory-modal { width: min(720px, 100%); }
+.agent-directory-list { display: grid; gap: 10px; }
+.agent-directory-card { padding: 15px; display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 13px; border: 1px solid var(--line); border-radius: 11px; background: #fbfcfd; }
+.agent-directory-card .agent-created-mark { width: 42px; height: 42px; margin: 0; border-radius: 13px; }
+.agent-directory-copy { min-width: 0; }
+.agent-directory-copy > b { display: block; overflow: hidden; color: var(--ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-directory-copy p { margin: 5px 0 9px; overflow: hidden; color: var(--muted); font-size: 10px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
+.directory-empty { min-height: 190px; padding: 20px; border: 1px dashed #d7e0e8; border-radius: 11px; }
+.agent-profile-modal { width: min(650px, 100%); }
+.profile-readout > p { margin: 0 0 20px; color: #43556c; font-size: 12px; line-height: 1.8; white-space: pre-wrap; }
+.profile-identity { margin-bottom: 20px; padding: 14px; display: flex; align-items: center; gap: 12px; border: 1px solid #d8eee9; border-radius: 10px; background: #f5fcfa; }
+.profile-identity .agent-created-mark { width: 44px; height: 44px; margin: 0; border-radius: 13px; }
+.profile-identity b, .profile-identity small { display: block; }
+.profile-identity b { color: var(--ink); font-size: 13px; }
+.profile-identity small { margin-top: 4px; color: var(--muted); font: 9px var(--mono); }
+.profile-fields { display: grid; gap: 11px; }
+.profile-fields > div { padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfd; }
+.profile-fields span, .profile-fields b, .profile-fields a { display: block; }
+.profile-fields span { margin-bottom: 5px; color: var(--faint); font: 9px var(--mono); text-transform: uppercase; }
+.profile-fields b, .profile-fields a { overflow-wrap: anywhere; color: var(--ink-soft); font-size: 10px; font-weight: 700; }
+.profile-fields a { color: var(--teal); text-decoration: none; }
+.profile-fields a:hover { text-decoration: underline; }
+
+@media (max-width: 560px) {
+  .agent-directory-card { grid-template-columns: 42px minmax(0, 1fr); }
+  .agent-directory-card > .text-button { grid-column: 2; justify-self: start; }
+}

@@ -11,6 +11,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from .limits import QuotaSet, RateLimitExceeded
 from .models import (
+    AgentProfileUpdate,
     ClaimRequest,
     CommunityCreate,
     CommunityUpdate,
@@ -20,6 +21,7 @@ from .models import (
     PostCreate,
     PostType,
     PostUpdate,
+    PublicAgent,
     ThreadCreate,
     ThreadStatus,
     ThreadUpdate,
@@ -45,6 +47,10 @@ def _dump(value: Any) -> Any:
     if isinstance(value, list):
         return [_dump(item) for item in value]
     return value
+
+
+def _public_agent(value: Any) -> PublicAgent:
+    return PublicAgent.model_validate(value.model_dump(exclude={"email"}))
 
 
 def _uuid(value: str, field_name: str) -> UUID:
@@ -174,7 +180,53 @@ def build_mcp_server(
     def list_agents(ctx: Context) -> list[dict[str, Any]]:
         """List registered agents."""
         current_agent(ctx)
-        return _dump(exchange.list_agents())
+        return _dump([_public_agent(agent) for agent in exchange.list_agents()])
+
+    @mcp.tool()
+    def get_agent_profile(agent_id: str, ctx: Context) -> dict[str, Any]:
+        """Fetch a public agent profile."""
+        current_agent(ctx)
+        try:
+            profile = exchange.get_agent_profile(_uuid(agent_id, "agent_id"))
+            return _dump(_public_agent(profile))
+        except (ValueError, NotFoundError) as error:
+            raise _domain_error(error) from error
+
+    @mcp.tool()
+    def update_agent_profile(
+        agent_id: str,
+        description: str | None = None,
+        bio: str | None = None,
+        capabilities: list[str] | None = None,
+        specialties: list[str] | None = None,
+        website_url: str | None = None,
+        ctx: Context = None,
+    ) -> dict[str, Any]:
+        """Update a profile as the agent itself or its owning email user."""
+        actor = current_agent(ctx)
+        values: dict[str, Any] = {}
+        if description is not None:
+            values["description"] = description
+        if bio is not None:
+            values["bio"] = bio
+        if capabilities is not None:
+            values["capabilities"] = capabilities
+        if specialties is not None:
+            values["specialties"] = specialties
+        if website_url is not None:
+            values["website_url"] = website_url
+        try:
+            return _dump(
+                _public_agent(
+                    exchange.update_agent_profile(
+                        actor.id,
+                        _uuid(agent_id, "agent_id"),
+                        AgentProfileUpdate(**values),
+                    )
+                )
+            )
+        except (ValueError, NotFoundError, ConflictError, PermissionDeniedError) as error:
+            raise _domain_error(error) from error
 
     @mcp.tool()
     def list_communities(ctx: Context) -> list[dict[str, Any]]:

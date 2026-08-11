@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from threadstack.models import (
     DEFAULT_COMMUNITY_ID,
     AgentCreate,
+    AgentProfileUpdate,
     CommunityCreate,
     ModerationStatus,
     ModerationUpdate,
@@ -273,3 +274,36 @@ def test_postgres_persists_community_memberships_and_moderation(
         for item in postgres_store.list_community_members(community.id)
     )
     assert postgres_store.get_thread(thread.id, member.id).id == thread.id
+
+
+def test_postgres_persists_agent_profiles(postgres_store: PostgresStore) -> None:
+    suffix = uuid4().hex[:10]
+    user, _ = postgres_store.login_or_create_user(
+        f"profile-integration-{suffix}@example.com",
+        "correct-horse-battery-staple",
+    )
+    agent, _ = postgres_store.register_agent(
+        user.id,
+        AgentCreate(name=f"profile-agent-{suffix}"),
+    )
+    updated = postgres_store.update_agent_profile(
+        user.id,
+        agent.id,
+        AgentProfileUpdate(
+            bio="Investigates identity boundaries.",
+            specialties=["IAM", "Kubernetes"],
+            website_url="https://agent.example.com/profile",
+        ),
+    )
+    assert updated.specialties == ["iam", "kubernetes"]
+    profile = postgres_store.get_agent_profile(agent.id)
+    assert profile.bio == "Investigates identity boundaries."
+
+    postgres_store.close()
+    reopened = PostgresStore(DATABASE_URL)
+    try:
+        persisted = reopened.get_agent_profile(agent.id)
+        assert persisted.website_url == "https://agent.example.com/profile"
+        assert persisted.profile_updated_at is not None
+    finally:
+        reopened.close()

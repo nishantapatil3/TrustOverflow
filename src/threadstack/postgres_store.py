@@ -24,6 +24,7 @@ from .models import (
     AccountType,
     Agent,
     AgentCreate,
+    AgentProfileUpdate,
     AgentStatus,
     ClaimRequest,
     Community,
@@ -77,8 +78,12 @@ AGENT_COLUMNS = """
     id,
     name,
     description,
+    bio,
     capabilities,
+    specialties,
+    website_url,
     public_key,
+    profile_updated_at,
     created_at,
     reputation,
     status,
@@ -184,8 +189,12 @@ class PostgresStore:
             id=row["id"],
             name=row["name"],
             description=row["description"],
+            bio=row.get("bio"),
             capabilities=row["capabilities"] or [],
+            specialties=row.get("specialties") or [],
+            website_url=row.get("website_url"),
             public_key=row["public_key"],
+            profile_updated_at=row.get("profile_updated_at"),
             created_at=row["created_at"],
             reputation=row["reputation"],
             status=row["status"],
@@ -505,16 +514,21 @@ class PostgresStore:
                 connection.execute(
                     """
                     INSERT INTO agents (
-                        id, name, description, capabilities, public_key,
-                        created_at, reputation, status, account_type, owner_id
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        id, name, description, bio, capabilities, specialties, website_url,
+                        public_key, profile_updated_at, created_at, reputation, status,
+                        account_type, owner_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         agent.id,
                         agent.name,
                         agent.description,
+                        agent.bio,
                         Jsonb(agent.capabilities),
+                        Jsonb(agent.specialties),
+                        agent.website_url,
                         agent.public_key,
+                        agent.profile_updated_at,
                         agent.created_at,
                         agent.reputation,
                         agent.status.value,
@@ -610,16 +624,21 @@ class PostgresStore:
                 connection.execute(
                     """
                     INSERT INTO agents (
-                        id, name, description, capabilities, public_key,
-                        created_at, reputation, status, account_type, owner_id, email
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        id, name, description, bio, capabilities, specialties, website_url,
+                        public_key, profile_updated_at, created_at, reputation, status,
+                        account_type, owner_id, email
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         user.id,
                         user.name,
                         user.description,
+                        user.bio,
                         Jsonb(user.capabilities),
+                        Jsonb(user.specialties),
+                        user.website_url,
                         user.public_key,
+                        user.profile_updated_at,
                         user.created_at,
                         user.reputation,
                         user.status.value,
@@ -827,6 +846,56 @@ class PostgresStore:
                 f"SELECT {AGENT_COLUMNS} FROM agents ORDER BY created_at, id"
             ).fetchall()
             return [self._agent_from_row(row) for row in rows]
+
+    def get_agent_profile(self, agent_id: UUID) -> Agent:
+        with self._connection() as connection:
+            row = connection.execute(
+                f"SELECT {AGENT_COLUMNS} FROM agents WHERE id = %s",
+                (agent_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(f"agent {agent_id} was not found")
+            return self._agent_from_row(row)
+
+    def update_agent_profile(
+        self,
+        actor_id: UUID,
+        agent_id: UUID,
+        data: AgentProfileUpdate,
+    ) -> Agent:
+        with self._connection() as connection:
+            actor = self._require_agent(connection, actor_id)
+            agent = self._require_agent(connection, agent_id)
+            if actor.id != agent.id and agent.owner_id != actor.id:
+                raise PermissionDeniedError("only the agent or its owner can edit this profile")
+            changes = data.model_dump(exclude_unset=True)
+            if not changes:
+                raise ConflictError("at least one profile field must be provided")
+            assignments: list[str] = []
+            parameters: list[Any] = []
+            for field in ("description", "bio", "website_url"):
+                if field in changes:
+                    assignments.append(f"{field} = %s")
+                    parameters.append(changes[field])
+            if data.capabilities is not None:
+                assignments.append("capabilities = %s")
+                parameters.append(Jsonb(sorted({item.casefold() for item in data.capabilities})))
+            if data.specialties is not None:
+                assignments.append("specialties = %s")
+                parameters.append(Jsonb(sorted({item.casefold() for item in data.specialties})))
+            assignments.append("profile_updated_at = %s")
+            parameters.extend([utc_now(), agent_id])
+            connection.execute(
+                f"UPDATE agents SET {', '.join(assignments)} WHERE id = %s",
+                parameters,
+            )
+            self._record_audit(connection, actor_id, "agent.profile_updated", "agent", agent_id)
+            row = connection.execute(
+                f"SELECT {AGENT_COLUMNS} FROM agents WHERE id = %s",
+                (agent_id,),
+            ).fetchone()
+            assert row is not None
+            return self._agent_from_row(row)
 
     def list_owned_agents(self, owner_id: UUID) -> list[Agent]:
         with self._connection() as connection:

@@ -41,7 +41,7 @@ def test_owner_created_agent_uses_mcp_to_create_nested_threads() -> None:
         "mcp-owner@example.com",
         "correct-horse-battery-staple",
     )
-    _, token = store.register_agent(
+    agent, token = store.register_agent(
         owner.id,
         AgentCreate(name="mcp-test-agent", description="MCP test agent"),
     )
@@ -133,3 +133,30 @@ def test_owner_created_agent_uses_mcp_to_create_nested_threads() -> None:
             token=token,
         )
         assert removed["structuredContent"]["score"] == 0
+
+        profile = mcp_call(
+            client,
+            9,
+            "get_agent_profile",
+            {"agent_id": str(agent.id)},
+            token=token,
+        )["structuredContent"]
+        assert profile["name"] == agent.name
+        assert "email" not in profile
+
+        directory = mcp_call(client, 11, "list_agents", {}, token=token)["structuredContent"]
+        assert all("email" not in item for item in directory)
+
+        updated_profile = mcp_call(
+            client,
+            12,
+            "update_agent_profile",
+            {
+                "agent_id": str(agent.id),
+                "bio": "MCP profile",
+                "specialties": ["IAM"],
+            },
+            token=token,
+        )["structuredContent"]
+        assert updated_profile["bio"] == "MCP profile"
+        assert updated_profile["specialties"] == ["iam"]

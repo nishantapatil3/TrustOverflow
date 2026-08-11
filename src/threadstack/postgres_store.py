@@ -52,6 +52,8 @@ from .provenance import (
     validate_public_key,
 )
 from .store import (
+    ACCESS_SESSION_TTL,
+    REFRESH_SESSION_TTL,
     AuthenticationError,
     ConflictError,
     NotFoundError,
@@ -483,7 +485,10 @@ class PostgresStore:
                 """,
                 (agent.id, digest_secret(token)),
             )
-            connection.execute("DELETE FROM sessions WHERE agent_id = %s", (agent.id,))
+            connection.execute(
+                "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE agent_id = %s",
+                (agent.id,),
+            )
             self._record_audit(connection, owner_id, "agent.token_rotated", "agent", agent.id)
             return agent, token
 
@@ -578,17 +583,39 @@ class PostgresStore:
                         return self._agent_from_row(existing), False
             raise AuthenticationError("invalid email or password") from error
 
-    def create_session(self, agent_id: UUID) -> tuple[str, datetime, Agent]:
+    def create_session_with_refresh(
+        self,
+        agent_id: UUID,
+    ) -> tuple[str, datetime, str, datetime, Agent]:
         with self._connection() as connection:
             agent = self._require_agent(connection, agent_id)
             access_token = secrets.token_urlsafe(32)
-            expires_at = utc_now() + timedelta(hours=24)
+            refresh_token = secrets.token_urlsafe(48)
+            now = utc_now()
+            expires_at = now + ACCESS_SESSION_TTL
+            refresh_expires_at = now + REFRESH_SESSION_TTL
             connection.execute(
-                "INSERT INTO sessions (token_digest, agent_id, expires_at) VALUES (%s, %s, %s)",
-                (digest_secret(access_token), agent_id, expires_at),
+                """
+                INSERT INTO sessions (
+                    token_digest, agent_id, expires_at, refresh_digest,
+                    refresh_expires_at, family_id
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    digest_secret(access_token),
+                    agent_id,
+                    expires_at,
+                    digest_secret(refresh_token),
+                    refresh_expires_at,
+                    uuid4(),
+                ),
             )
             self._record_audit(connection, agent_id, "session.created", "session", None)
-            return access_token, expires_at, agent
+            return access_token, expires_at, refresh_token, refresh_expires_at, agent
+
+    def create_session(self, agent_id: UUID) -> tuple[str, datetime, Agent]:
+        access_token, expires_at, _, _, agent = self.create_session_with_refresh(agent_id)
+        return access_token, expires_at, agent
 
     def authenticate_session(self, access_token: str) -> Agent:
         session_digest = digest_secret(access_token)
@@ -614,30 +641,112 @@ class PostgresStore:
                 FROM sessions
                 JOIN agents ON agents.id = sessions.agent_id
                 WHERE sessions.token_digest = %s
+                  AND sessions.revoked_at IS NULL
                   AND sessions.expires_at > CURRENT_TIMESTAMP
                 """,
                 (session_digest,),
             ).fetchone()
             if row is None:
-                connection.execute(
-                    "DELETE FROM sessions WHERE token_digest = %s",
-                    (session_digest,),
-                )
                 raise AuthenticationError("invalid or expired access token")
             agent = self._agent_from_row(row)
             if agent.status is AgentStatus.SUSPENDED:
                 raise ConflictError("the agent is suspended")
             return agent
 
+    def refresh_session(
+        self,
+        refresh_token: str,
+    ) -> tuple[str, datetime, str, datetime, Agent]:
+        refresh_digest = digest_secret(refresh_token)
+        with self._connection() as connection:
+            row = connection.execute(
+                f"""
+                SELECT sessions.*, {AGENT_COLUMNS}
+                FROM sessions
+                JOIN agents ON agents.id = sessions.agent_id
+                WHERE sessions.refresh_digest = %s
+                FOR UPDATE
+                """,
+                (refresh_digest,),
+            ).fetchone()
+            if row is None:
+                raise AuthenticationError("invalid or expired refresh token")
+            if row["revoked_at"] is not None:
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET revoked_at = CURRENT_TIMESTAMP
+                    WHERE family_id = %s AND revoked_at IS NULL
+                    """,
+                    (row["family_id"],),
+                )
+                self._record_audit(
+                    connection,
+                    row["agent_id"],
+                    "session.refresh_reuse_detected",
+                    "session",
+                )
+                connection.commit()
+                raise AuthenticationError("refresh token reuse detected")
+
+            now = utc_now()
+            if row["refresh_expires_at"] <= now:
+                connection.execute(
+                    "UPDATE sessions SET revoked_at = %s WHERE token_digest = %s",
+                    (now, row["token_digest"]),
+                )
+                connection.commit()
+                raise AuthenticationError("invalid or expired refresh token")
+
+            agent = self._agent_from_row(row)
+            if agent.status is AgentStatus.SUSPENDED:
+                raise ConflictError("the agent is suspended")
+            access_token = secrets.token_urlsafe(32)
+            new_refresh_token = secrets.token_urlsafe(48)
+            access_expires_at = now + ACCESS_SESSION_TTL
+            refresh_expires_at = now + REFRESH_SESSION_TTL
+            connection.execute(
+                "UPDATE sessions SET revoked_at = %s WHERE token_digest = %s",
+                (now, row["token_digest"]),
+            )
+            connection.execute(
+                """
+                INSERT INTO sessions (
+                    token_digest, agent_id, expires_at, refresh_digest,
+                    refresh_expires_at, family_id
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    digest_secret(access_token),
+                    row["agent_id"],
+                    access_expires_at,
+                    digest_secret(new_refresh_token),
+                    refresh_expires_at,
+                    row["family_id"],
+                ),
+            )
+            self._record_audit(connection, agent.id, "session.refreshed", "session")
+            return (
+                access_token,
+                access_expires_at,
+                new_refresh_token,
+                refresh_expires_at,
+                agent,
+            )
+
     def authenticate_token(self, token: str) -> Agent:
         """Authenticate an agent credential or short-lived login session."""
         return self.authenticate_session(token)
 
-    def revoke_session(self, access_token: str) -> None:
+    def revoke_session(self, token: str) -> None:
         with self._connection() as connection:
             connection.execute(
-                "DELETE FROM sessions WHERE token_digest = %s",
-                (digest_secret(access_token),),
+                """
+                UPDATE sessions
+                SET revoked_at = CURRENT_TIMESTAMP
+                WHERE token_digest = %s OR refresh_digest = %s
+                """,
+                (digest_secret(token), digest_secret(token)),
             )
 
     def list_agents(self) -> list[Agent]:

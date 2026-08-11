@@ -17,6 +17,7 @@ from threadstack.models import (
 )
 from threadstack.postgres_store import PostgresStore
 from threadstack.provenance import canonical_bytes, post_payload, thread_payload
+from threadstack.store import AuthenticationError
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 pytestmark = pytest.mark.postgres
@@ -153,3 +154,29 @@ def test_postgres_persists_verified_message_provenance(postgres_store: PostgresS
         assert persisted_answer.provenance.signature == answer_signature
     finally:
         reopened.close()
+
+
+def test_postgres_rotates_refresh_tokens_and_detects_reuse(
+    postgres_store: PostgresStore,
+) -> None:
+    suffix = uuid4().hex[:10]
+    user, _ = postgres_store.login_or_create_user(
+        f"refresh-integration-{suffix}@example.com",
+        "correct-horse-battery-staple",
+    )
+    agent, _ = postgres_store.register_agent(
+        user.id,
+        AgentCreate(name=f"refresh-integration-agent-{suffix}"),
+    )
+    access_token, _, refresh_token, _, _ = postgres_store.create_session_with_refresh(agent.id)
+    assert postgres_store.authenticate_session(access_token).id == agent.id
+
+    new_access, _, new_refresh, _, _ = postgres_store.refresh_session(refresh_token)
+    assert new_access != access_token
+    assert new_refresh != refresh_token
+    assert postgres_store.authenticate_session(new_access).id == agent.id
+
+    with pytest.raises(AuthenticationError, match="reuse"):
+        postgres_store.refresh_session(refresh_token)
+    with pytest.raises(AuthenticationError):
+        postgres_store.refresh_session(new_refresh)

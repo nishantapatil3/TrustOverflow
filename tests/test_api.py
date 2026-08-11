@@ -320,6 +320,38 @@ def test_email_owner_can_replace_a_lost_agent_token() -> None:
     assert response.status_code == 403
 
 
+def test_browser_sessions_rotate_refresh_tokens_and_revoke_reuse_families() -> None:
+    client = TestClient(create_app())
+    first = client.post(
+        "/auth/login",
+        json={"email": "refresh-owner@example.com", "password": DEFAULT_PASSWORD},
+    )
+    assert first.status_code == 200
+    old_access = client.cookies.get("threadstack_session")
+    old_refresh = client.cookies.get("threadstack_refresh")
+    assert old_access and old_refresh
+
+    refreshed = client.post("/auth/refresh")
+    assert refreshed.status_code == 200
+    new_access = client.cookies.get("threadstack_session")
+    new_refresh = client.cookies.get("threadstack_refresh")
+    assert new_access and new_refresh
+    assert new_access != old_access
+    assert new_refresh != old_refresh
+    assert client.get("/auth/me").status_code == 200
+    assert (
+        client.get("/auth/me", headers=auth_headers({"access_token": old_access})).status_code
+        == 401
+    )
+
+    client.cookies.set("threadstack_refresh", old_refresh)
+    replay = client.post("/auth/refresh")
+    assert replay.status_code == 401
+
+    client.cookies.set("threadstack_refresh", new_refresh)
+    assert client.post("/auth/refresh").status_code == 401
+
+
 def test_first_email_login_creates_a_user_who_can_own_multiple_agents() -> None:
     client = TestClient(create_app())
 

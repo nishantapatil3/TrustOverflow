@@ -63,10 +63,18 @@ class PermissionDeniedError(StoreError):
     pass
 
 
-@dataclass(frozen=True)
+@dataclass
 class Session:
     agent_id: UUID
     expires_at: datetime
+    refresh_digest: str
+    refresh_expires_at: datetime
+    family_id: UUID
+    revoked_at: datetime | None = None
+
+
+ACCESS_SESSION_TTL = timedelta(minutes=15)
+REFRESH_SESSION_TTL = timedelta(days=30)
 
 
 def utc_now() -> datetime:
@@ -137,6 +145,7 @@ class ExchangeStore:
         self._email_users: dict[str, UUID] = {}
         self._user_passwords: dict[UUID, str] = {}
         self._sessions: dict[str, Session] = {}
+        self._refresh_sessions: dict[str, str] = {}
         self._communities: dict[UUID, Community] = {
             DEFAULT_COMMUNITY_ID: Community(
                 id=DEFAULT_COMMUNITY_ID,
@@ -252,11 +261,7 @@ class ExchangeStore:
 
             token = secrets.token_urlsafe(32)
             self._agent_keys[agent.id] = digest_secret(token)
-            self._sessions = {
-                digest: session
-                for digest, session in self._sessions.items()
-                if session.agent_id != agent.id
-            }
+            self._revoke_agent_sessions(agent.id)
             self._record_audit(owner.id, "agent.token_rotated", "agent", agent.id)
             return agent.model_copy(deep=True), token
 
@@ -288,17 +293,62 @@ class ExchangeStore:
             self._record_audit(user.id, "user.created", "user", user.id)
             return user.model_copy(deep=True), True
 
-    def create_session(self, agent_id: UUID) -> tuple[str, datetime, Agent]:
+    def _revoke_agent_sessions(self, agent_id: UUID) -> None:
+        revoked_at = utc_now()
+        for session in self._sessions.values():
+            if session.agent_id == agent_id and session.revoked_at is None:
+                session.revoked_at = revoked_at
+
+    def _revoke_session_family(self, family_id: UUID) -> None:
+        revoked_at = utc_now()
+        for session in self._sessions.values():
+            if session.family_id == family_id and session.revoked_at is None:
+                session.revoked_at = revoked_at
+
+    def _issue_session(
+        self,
+        agent_id: UUID,
+        *,
+        family_id: UUID | None = None,
+    ) -> tuple[str, datetime, str, datetime]:
+        access_token = secrets.token_urlsafe(32)
+        refresh_token = secrets.token_urlsafe(48)
+        now = utc_now()
+        expires_at = now + ACCESS_SESSION_TTL
+        refresh_expires_at = now + REFRESH_SESSION_TTL
+        session = Session(
+            agent_id=agent_id,
+            expires_at=expires_at,
+            refresh_digest=digest_secret(refresh_token),
+            refresh_expires_at=refresh_expires_at,
+            family_id=family_id or uuid4(),
+        )
+        access_digest = digest_secret(access_token)
+        self._sessions[access_digest] = session
+        self._refresh_sessions[session.refresh_digest] = access_digest
+        return access_token, expires_at, refresh_token, refresh_expires_at
+
+    def create_session_with_refresh(
+        self,
+        agent_id: UUID,
+    ) -> tuple[str, datetime, str, datetime, Agent]:
         with self._lock:
             agent = self.require_agent(agent_id)
-            access_token = secrets.token_urlsafe(32)
-            expires_at = utc_now() + timedelta(hours=24)
-            self._sessions[digest_secret(access_token)] = Session(
-                agent_id=agent_id,
-                expires_at=expires_at,
+            access_token, expires_at, refresh_token, refresh_expires_at = self._issue_session(
+                agent_id
             )
             self._record_audit(agent_id, "session.created", "session")
-            return access_token, expires_at, agent.model_copy(deep=True)
+            return (
+                access_token,
+                expires_at,
+                refresh_token,
+                refresh_expires_at,
+                agent.model_copy(deep=True),
+            )
+
+    def create_session(self, agent_id: UUID) -> tuple[str, datetime, Agent]:
+        access_token, expires_at, _, _, agent = self.create_session_with_refresh(agent_id)
+        return access_token, expires_at, agent
 
     def authenticate_session(self, access_token: str) -> Agent:
         with self._lock:
@@ -309,18 +359,59 @@ class ExchangeStore:
 
             session_digest = token_digest
             session = self._sessions.get(session_digest)
-            if session is None or session.expires_at <= utc_now():
-                self._sessions.pop(session_digest, None)
+            if (
+                session is None
+                or session.revoked_at is not None
+                or session.expires_at <= utc_now()
+            ):
                 raise AuthenticationError("invalid or expired access token")
             return self.require_agent(session.agent_id).model_copy(deep=True)
+
+    def refresh_session(
+        self,
+        refresh_token: str,
+    ) -> tuple[str, datetime, str, datetime, Agent]:
+        with self._lock:
+            refresh_digest = digest_secret(refresh_token)
+            access_digest = self._refresh_sessions.get(refresh_digest)
+            session = self._sessions.get(access_digest) if access_digest else None
+            if session is None:
+                raise AuthenticationError("invalid or expired refresh token")
+            if session.revoked_at is not None:
+                self._revoke_session_family(session.family_id)
+                raise AuthenticationError("refresh token reuse detected")
+            if session.refresh_expires_at <= utc_now():
+                session.revoked_at = utc_now()
+                raise AuthenticationError("invalid or expired refresh token")
+
+            agent = self.require_agent(session.agent_id)
+            session.revoked_at = utc_now()
+            access_token, expires_at, new_refresh_token, refresh_expires_at = self._issue_session(
+                agent.id,
+                family_id=session.family_id,
+            )
+            self._record_audit(agent.id, "session.refreshed", "session")
+            return (
+                access_token,
+                expires_at,
+                new_refresh_token,
+                refresh_expires_at,
+                agent.model_copy(deep=True),
+            )
 
     def authenticate_token(self, token: str) -> Agent:
         """Authenticate an agent credential or short-lived login session."""
         return self.authenticate_session(token)
 
-    def revoke_session(self, access_token: str) -> None:
+    def revoke_session(self, token: str) -> None:
         with self._lock:
-            self._sessions.pop(digest_secret(access_token), None)
+            token_digest = digest_secret(token)
+            access_digest = token_digest
+            if access_digest not in self._sessions:
+                access_digest = self._refresh_sessions.get(token_digest, "")
+            session = self._sessions.get(access_digest)
+            if session is not None:
+                session.revoked_at = utc_now()
 
     def list_agents(self) -> list[Agent]:
         with self._lock:

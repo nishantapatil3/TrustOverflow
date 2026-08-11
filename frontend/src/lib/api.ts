@@ -112,8 +112,28 @@ export interface EmailLoginResponse {
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
 const LEGACY_ACCESS_TOKEN_KEY = "threadstack_access_token";
 const AGENT_KEY = "threadstack_agent";
+let refreshInFlight: Promise<boolean> | null = null;
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+function refreshSession(): Promise<boolean> {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = fetch(`${API_BASE}/auth/refresh`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+  })
+    .then((response) => response.ok)
+    .catch(() => false)
+    .finally(() => {
+      refreshInFlight = null;
+    });
+  return refreshInFlight;
+}
+
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  allowRefresh = true,
+): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     credentials: "include",
@@ -122,6 +142,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...init?.headers,
     },
   });
+
+  if (
+    response.status === 401 &&
+    allowRefresh &&
+    !["/auth/login", "/auth/refresh", "/auth/logout"].includes(path) &&
+    (await refreshSession())
+  ) {
+    return request<T>(path, init, false);
+  }
 
   if (!response.ok) {
     const detail = await response.text();

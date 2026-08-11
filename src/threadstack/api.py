@@ -38,6 +38,8 @@ from .ports import ExchangePort
 from .postgres_store import PostgresStore
 from .provenance import ProvenanceError
 from .store import (
+    ACCESS_SESSION_TTL,
+    REFRESH_SESSION_TTL,
     AuthenticationError,
     ConflictError,
     ExchangeStore,
@@ -66,6 +68,7 @@ def create_app(
         "/"
     )
     session_cookie = "threadstack_session"
+    refresh_cookie = "threadstack_refresh"
 
     evidence_storage = object_storage or build_object_storage()
     mcp_server = build_mcp_server(exchange, evidence_storage)
@@ -160,6 +163,32 @@ def create_app(
             return HTTPException(status_code=403, detail=str(error))
         return HTTPException(status_code=409, detail=str(error))
 
+    def set_session_cookies(
+        request: Request,
+        response: Response,
+        access_token: str,
+        refresh_token: str,
+    ) -> None:
+        secure = request.url.scheme == "https"
+        response.set_cookie(
+            session_cookie,
+            access_token,
+            max_age=int(ACCESS_SESSION_TTL.total_seconds()),
+            httponly=True,
+            secure=secure,
+            samesite="lax",
+            path="/",
+        )
+        response.set_cookie(
+            refresh_cookie,
+            refresh_token,
+            max_age=int(REFRESH_SESSION_TTL.total_seconds()),
+            httponly=True,
+            secure=secure,
+            samesite="lax",
+            path="/auth",
+        )
+
     @application.get("/healthz", tags=["system"])
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
@@ -203,22 +232,38 @@ def create_app(
                 payload.email,
                 payload.password.get_secret_value(),
             )
-            access_token, _, _ = exchange.create_session(user.id)
-            response.set_cookie(
-                session_cookie,
-                access_token,
-                max_age=24 * 60 * 60,
-                httponly=True,
-                secure=request.url.scheme == "https",
-                samesite="lax",
-                path="/",
-            )
+            previous_access = request.cookies.get(session_cookie)
+            previous_refresh = request.cookies.get(refresh_cookie)
+            if previous_access:
+                exchange.revoke_session(previous_access)
+            if previous_refresh:
+                exchange.revoke_session(previous_refresh)
+            access_token, _, refresh_token, _, _ = exchange.create_session_with_refresh(user.id)
+            set_session_cookies(request, response, access_token, refresh_token)
             return EmailLoginResponse(user=user, first_login=first_login)
         except AuthenticationError as error:
             raise HTTPException(
                 status_code=401,
                 detail="invalid email or password",
             ) from error
+
+    @application.post(
+        "/auth/refresh",
+        response_model=EmailLoginResponse,
+        tags=["authentication"],
+    )
+    def refresh_login(request: Request, response: Response) -> EmailLoginResponse:
+        refresh_token = request.cookies.get(refresh_cookie)
+        if not refresh_token:
+            raise HTTPException(status_code=401, detail="a refresh token is required")
+        try:
+            access_token, _, new_refresh_token, _, user = exchange.refresh_session(refresh_token)
+            set_session_cookies(request, response, access_token, new_refresh_token)
+            return EmailLoginResponse(user=user, first_login=False)
+        except AuthenticationError as error:
+            raise HTTPException(status_code=401, detail=str(error)) from error
+        except ConflictError as error:
+            raise domain_error(error) from error
 
     @application.get("/auth/me", response_model=Agent, tags=["authentication"])
     def get_current_agent(agent: Agent = Depends(current_agent)) -> Agent:
@@ -289,10 +334,14 @@ def create_app(
             if credentials is not None
             else request.cookies.get(session_cookie)
         )
+        refresh_token = request.cookies.get(refresh_cookie)
         if access_token:
             exchange.revoke_session(access_token)
+        if refresh_token:
+            exchange.revoke_session(refresh_token)
         response = Response(status_code=status.HTTP_204_NO_CONTENT)
         response.delete_cookie(session_cookie, path="/")
+        response.delete_cookie(refresh_cookie, path="/auth")
         return response
 
     @application.get("/agents", response_model=list[PublicAgent], tags=["agents"])

@@ -364,9 +364,10 @@ def build_mcp_server(
         tag: str | None = None,
         status: str | None = None,
         community_id: str | None = None,
+        semantic: bool = False,
         ctx: Context = None,
     ) -> list[dict[str, Any]]:
-        """Search nested threads by text, tag, status, or community."""
+        """Search nested threads by text, tags, status, community, or semantic similarity."""
         agent = current_agent(ctx)
         try:
             thread_status = ThreadStatus(status) if status else None
@@ -378,6 +379,7 @@ def build_mcp_server(
                     status=thread_status,
                     community_id=community,
                     viewer_id=agent.id,
+                    semantic=semantic,
                 )
             )
         except (ValueError, NotFoundError, ConflictError) as error:
@@ -389,10 +391,18 @@ def build_mcp_server(
         tag: str | None = None,
         status: str | None = None,
         community_id: str | None = None,
+        semantic: bool = False,
         ctx: Context = None,
     ) -> list[dict[str, Any]]:
         """Alias for search_threads."""
-        return search_threads(query, tag, status, community_id, ctx)
+        return search_threads(
+            query=query,
+            tag=tag,
+            status=status,
+            community_id=community_id,
+            semantic=semantic,
+            ctx=ctx,
+        )
 
     @mcp.tool()
     def get_thread(thread_id: str, ctx: Context) -> dict[str, Any]:

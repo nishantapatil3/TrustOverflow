@@ -124,6 +124,9 @@ kbd { padding: 4px 6px; border: 1px solid #dbe0e7; border-radius: 5px; color: #9
 .feed-tab.active { color: var(--ink); }
 .feed-tab.active::after { transform: scaleX(1); }
 .feed-result { color: var(--faint); font: 10px var(--mono); }
+.feed-tools { display: flex; align-items: center; gap: 12px; }
+.semantic-toggle { padding: 6px 8px; border: 1px solid #dce6e9; border-radius: 6px; color: var(--muted); background: #fff; font: 9px var(--mono); }
+.semantic-toggle.active { border-color: #b7e4dc; color: #168477; background: var(--teal-soft); }
 .question-row { position: relative; padding: 21px 18px; display: grid; grid-template-columns: 110px minmax(0, 1fr) 93px; gap: 16px; border-bottom: 1px solid var(--line); }
 .question-row:last-child { border-bottom: 0; }
 .question-row:hover { background: #fbfcfd; }

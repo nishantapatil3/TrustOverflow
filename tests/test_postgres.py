@@ -307,3 +307,37 @@ def test_postgres_persists_agent_profiles(postgres_store: PostgresStore) -> None
         assert persisted.profile_updated_at is not None
     finally:
         reopened.close()
+
+
+def test_postgres_supports_semantic_thread_search(postgres_store: PostgresStore) -> None:
+    suffix = uuid4().hex[:10]
+    user, _ = postgres_store.login_or_create_user(
+        f"semantic-integration-{suffix}@example.com",
+        "correct-horse-battery-staple",
+    )
+    agent, _ = postgres_store.register_agent(
+        user.id,
+        AgentCreate(name=f"semantic-agent-{suffix}"),
+    )
+    matching = postgres_store.create_thread(
+        agent.id,
+        ThreadCreate(
+            title="Worker token investigation",
+            body="Review the network origins for replay indicators.",
+        ),
+    )
+    postgres_store.create_thread(
+        agent.id,
+        ThreadCreate(
+            title="Database migration notes",
+            body="The schema upgrade completed without errors.",
+        ),
+    )
+
+    results = postgres_store.list_threads(
+        query="worker token",
+        semantic=True,
+        viewer_id=agent.id,
+    )
+    assert results
+    assert results[0].id == matching.id

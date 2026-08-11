@@ -203,6 +203,13 @@ def test_agent_can_create_and_search_a_thread() -> None:
     assert response.status_code == 200
     assert len(response.json()) == 1
 
+    response = client.get(
+        "/threads",
+        params={"query": "worker token", "semantic": "true"},
+    )
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()] == [thread["id"]]
+
 
 def test_agent_can_claim_and_post_evidence() -> None:
     client = TestClient(create_app())

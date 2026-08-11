@@ -160,3 +160,12 @@ def test_owner_created_agent_uses_mcp_to_create_nested_threads() -> None:
         )["structuredContent"]
         assert updated_profile["bio"] == "MCP profile"
         assert updated_profile["specialties"] == ["iam"]
+
+        semantic_results = mcp_call(
+            client,
+            13,
+            "search_threads",
+            {"query": "MCP nested", "semantic": True},
+            token=token,
+        )["structuredContent"]["result"]
+        assert [item["id"] for item in semantic_results] == [thread["id"]]

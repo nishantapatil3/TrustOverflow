@@ -59,6 +59,7 @@ from .provenance import (
     thread_payload,
     validate_public_key,
 )
+from .semantic import embed_text, thread_search_text, vector_literal
 from .store import (
     ACCESS_SESSION_TTL,
     REFRESH_SESSION_TTL,
@@ -118,6 +119,7 @@ class PostgresStore:
             raise ValueError("DATABASE_POOL_MAX_SIZE must be at least DATABASE_POOL_MIN_SIZE")
         self._initialize_schema()
         self._pool = self._open_pool()
+        self._semantic_vector_available = self._detect_semantic_vector()
 
     @contextmanager
     def _connection(self) -> Iterator[psycopg.Connection[Any]]:
@@ -182,6 +184,54 @@ class PostgresStore:
 
     def close(self) -> None:
         self._pool.close()
+
+    def _detect_semantic_vector(self) -> bool:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_name = 'threads' AND column_name = 'semantic_embedding'
+                ) AS available
+                """
+            ).fetchone()
+            return bool(row and row["available"])
+
+    def _refresh_thread_search(
+        self,
+        connection: psycopg.Connection[Any],
+        thread_id: UUID,
+    ) -> None:
+        thread = connection.execute(
+            "SELECT title, tags FROM threads WHERE id = %s",
+            (thread_id,),
+        ).fetchone()
+        if thread is None:
+            return
+        posts = connection.execute(
+            """
+            SELECT body
+            FROM posts
+            WHERE thread_id = %s AND moderation_status = %s
+            ORDER BY created_at, id
+            """,
+            (thread_id, ModerationStatus.VISIBLE.value),
+        ).fetchall()
+        search_text = thread_search_text(
+            thread["title"],
+            [str(tag) for tag in (thread["tags"] or [])],
+            [post["body"] for post in posts],
+        )
+        connection.execute(
+            "UPDATE threads SET search_vector = to_tsvector('simple', %s) WHERE id = %s",
+            (search_text, thread_id),
+        )
+        if self._semantic_vector_available:
+            connection.execute(
+                "UPDATE threads SET semantic_embedding = %s::vector WHERE id = %s",
+                (vector_literal(embed_text(search_text)), thread_id),
+            )
 
     @staticmethod
     def _agent_from_row(row: dict[str, Any]) -> Agent:
@@ -1286,6 +1336,7 @@ class PostgresStore:
                     quarantine,
                 ),
             )
+            self._refresh_thread_search(connection, thread_id)
             self._record_audit(connection, author_id, "thread.created", "thread", thread_id)
             return self._thread_from_row(
                 connection,
@@ -1301,6 +1352,7 @@ class PostgresStore:
         status: ThreadStatus | None = None,
         community_id: UUID | None = None,
         viewer_id: UUID | None = None,
+        semantic: bool = False,
     ) -> list[Thread]:
         if viewer_id is None:
             conditions = ["moderation_status = %s"]
@@ -1341,7 +1393,31 @@ class PostgresStore:
         if tag:
             conditions.append("tags @> %s")
             parameters.append(Jsonb([tag.casefold()]))
-        if query:
+        order_by = "updated_at DESC"
+        order_parameters: list[Any] = []
+        if query and query.strip() and semantic:
+            query_text = query.strip()
+            if self._semantic_vector_available:
+                conditions.append(
+                    "(semantic_embedding IS NOT NULL OR "
+                    "search_vector @@ websearch_to_tsquery('simple', %s))"
+                )
+                parameters.append(query_text)
+                order_by = (
+                    "semantic_embedding <=> %s::vector ASC NULLS LAST, "
+                    "ts_rank_cd(search_vector, websearch_to_tsquery('simple', %s)) DESC, "
+                    "updated_at DESC"
+                )
+                order_parameters.extend([vector_literal(embed_text(query_text)), query_text])
+            else:
+                conditions.append("search_vector @@ websearch_to_tsquery('simple', %s)")
+                parameters.append(query_text)
+                order_by = (
+                    "ts_rank_cd(search_vector, websearch_to_tsquery('simple', %s)) DESC, "
+                    "updated_at DESC"
+                )
+                order_parameters.append(query_text)
+        elif query and query.strip():
             pattern = f"%{query.casefold()}%"
             post_visibility = "posts.moderation_status = %s"
             post_parameters: list[Any] = [ModerationStatus.VISIBLE.value]
@@ -1363,9 +1439,9 @@ class PostgresStore:
                      WHERE upvotes.thread_id = threads.id) AS score
                 FROM threads
                 WHERE {' AND '.join(conditions)}
-                ORDER BY updated_at DESC
+                ORDER BY {order_by}
                 """,
-                parameters,
+                [*parameters, *order_parameters],
             ).fetchall()
             return [self._thread_from_row(connection, row, viewer_id) for row in rows]
 
@@ -1447,6 +1523,7 @@ class PostgresStore:
                 "UPDATE threads SET status = %s, updated_at = %s WHERE id = %s",
                 (ThreadStatus.IN_PROGRESS.value, now, thread_id),
             )
+            self._refresh_thread_search(connection, thread_id)
             self._record_audit(connection, author_id, "post.created", "post", post_id)
             row = connection.execute(self._post_select(), (post_id,)).fetchone()
             assert row is not None
@@ -1533,6 +1610,7 @@ class PostgresStore:
                 "UPDATE threads SET updated_at = %s WHERE id = %s",
                 (utc_now(), post["thread_id"]),
             )
+            self._refresh_thread_search(connection, post["thread_id"])
             self._record_audit(connection, author_id, "post.updated", "post", post_id)
             row = connection.execute(self._post_select(), (post_id,)).fetchone()
             assert row is not None
@@ -1578,6 +1656,7 @@ class PostgresStore:
                 "UPDATE threads SET updated_at = %s WHERE id = %s",
                 (utc_now(), post["thread_id"]),
             )
+            self._refresh_thread_search(connection, post["thread_id"])
             self._record_audit(connection, author_id, "post.deleted", "post", post_id)
 
     def update_thread(self, thread_id: UUID, author_id: UUID, data: ThreadUpdate) -> Thread:
@@ -1684,6 +1763,7 @@ class PostgresStore:
                         root["id"],
                     ),
                 )
+            self._refresh_thread_search(connection, thread_id)
             self._record_audit(connection, author_id, "thread.updated", "thread", thread_id)
             return self._thread_from_row(
                 connection,
@@ -1792,6 +1872,7 @@ class PostgresStore:
                     """,
                     (data.status.value, reason, post["thread_id"]),
                 )
+            self._refresh_thread_search(connection, post["thread_id"])
             self._record_audit(connection, moderator_id, "post.moderated", "post", post_id)
             row = connection.execute(self._post_select(), (post_id,)).fetchone()
             assert row is not None
@@ -1831,6 +1912,7 @@ class PostgresStore:
                 """,
                 (data.status.value, reason, thread_id),
             )
+            self._refresh_thread_search(connection, thread_id)
             self._record_audit(connection, moderator_id, "thread.moderated", "thread", thread_id)
             return self._thread_from_row(
                 connection,

@@ -87,6 +87,11 @@ export interface ThreadCreate {
   community_id?: string;
 }
 
+export interface ThreadListOptions {
+  query?: string;
+  semantic?: boolean;
+}
+
 export interface PostCreate {
   type: PostType;
   body: string;
@@ -176,8 +181,12 @@ async function request<T>(
   return response.json() as Promise<T>;
 }
 
-export function listThreads(): Promise<Thread[]> {
-  return request<Thread[]>("/threads");
+export function listThreads(options: ThreadListOptions = {}): Promise<Thread[]> {
+  const params = new URLSearchParams();
+  if (options.query?.trim()) params.set("query", options.query.trim());
+  if (options.semantic) params.set("semantic", "true");
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return request<Thread[]>(`/threads${suffix}`);
 }
 
 export function listAgents(): Promise<Agent[]> {

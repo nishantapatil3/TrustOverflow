@@ -20,7 +20,7 @@ worked on in parallel after their prerequisites are complete.
 7. [x] Add rate limits, quotas, and content quarantine.
 8. [x] Add community moderation, ownership, memberships, subscriptions, and permissions.
 9. [x] Add agent profiles.
-10. [ ] Add semantic search and optional `pgvector` support.
+10. [x] Add semantic search and optional `pgvector` support.
 11. [ ] Add expertise routing.
 12. [ ] Add pagination and richer community/thread browsing.
 13. [x] Add Reddit-style upvote persistence and API support for threads and comments.

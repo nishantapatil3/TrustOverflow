@@ -49,6 +49,7 @@ from .provenance import (
     thread_payload,
     validate_public_key,
 )
+from .semantic import cosine_similarity, embed_text, thread_search_text
 
 
 class StoreError(Exception):
@@ -784,11 +785,15 @@ class ExchangeStore:
         status: ThreadStatus | None = None,
         community_id: UUID | None = None,
         viewer_id: UUID | None = None,
+        semantic: bool = False,
     ) -> list[Thread]:
         with self._lock:
-            normalized_query = query.casefold() if query else None
+            normalized_query = query.casefold().strip() if query else None
             normalized_tag = tag.casefold() if tag else None
-            threads = []
+            query_embedding = (
+                embed_text(normalized_query) if semantic and normalized_query else None
+            )
+            ranked_threads: list[tuple[float, Thread]] = []
             for thread in self._threads.values():
                 if (
                     thread.moderation_status is ModerationStatus.QUARANTINED
@@ -803,13 +808,39 @@ class ExchangeStore:
                 if normalized_tag is not None and normalized_tag not in thread.tags:
                     continue
                 if normalized_query is not None:
-                    searchable = " ".join(
-                        [thread.title, *thread.tags, *(post.body for post in thread.posts)]
-                    ).casefold()
-                    if normalized_query not in searchable:
+                    searchable = thread_search_text(
+                        thread.title,
+                        thread.tags,
+                        [post.body for post in thread.posts],
+                    )
+                    if query_embedding is not None:
+                        score = cosine_similarity(embed_text(searchable), query_embedding)
+                        if score < 0.05:
+                            continue
+                    elif normalized_query not in searchable.casefold():
                         continue
-                threads.append(self._thread_view(thread, viewer_id))
-            return sorted(threads, key=lambda item: item.updated_at, reverse=True)
+                    else:
+                        score = 0.0
+                else:
+                    score = 0.0
+                ranked_threads.append((score, self._thread_view(thread, viewer_id)))
+            if query_embedding is not None:
+                return [
+                    thread
+                    for _, thread in sorted(
+                        ranked_threads,
+                        key=lambda item: (item[0], item[1].updated_at),
+                        reverse=True,
+                    )
+                ]
+            return [
+                thread
+                for _, thread in sorted(
+                    ranked_threads,
+                    key=lambda item: item[1].updated_at,
+                    reverse=True,
+                )
+            ]
 
     def require_thread(self, thread_id: UUID) -> Thread:
         thread = self._threads.get(thread_id)

@@ -122,6 +122,7 @@ class ExchangePort(Protocol):
         status: ThreadStatus | None = None,
         community_id: UUID | None = None,
         viewer_id: UUID | None = None,
+        semantic: bool = False,
     ) -> list[Thread]: ...
 
     def get_thread(self, thread_id: UUID, viewer_id: UUID | None = None) -> Thread: ...

@@ -591,6 +591,7 @@ def create_app(
         tag: str | None = Query(default=None, max_length=200),
         thread_status: ThreadStatus | None = Query(default=None, alias="status"),
         community_id: UUID | None = Query(default=None),
+        semantic: bool = Query(default=False),
         viewer: Agent | None = Depends(optional_agent),
     ) -> list[Thread]:
         return exchange.list_threads(
@@ -599,6 +600,7 @@ def create_app(
             status=thread_status,
             community_id=community_id,
             viewer_id=viewer.id if viewer else None,
+            semantic=semantic,
         )
 
     @application.get("/threads/{thread_id}", response_model=Thread, tags=["threads"])

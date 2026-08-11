@@ -83,6 +83,7 @@ function App() {
   const [communities, setCommunities] = useState<Community[]>([]);
   const [filter, setFilter] = useState<FeedFilter>("newest");
   const [search, setSearch] = useState("");
+  const [semanticSearch, setSemanticSearch] = useState(false);
   const [selectedCommunityId, setSelectedCommunityId] = useState("");
   const [selectedThread, setSelectedThread] = useState<Thread | null>(null);
   const [showAsk, setShowAsk] = useState(false);
@@ -150,6 +151,18 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let mounted = true;
+    void listThreads({ query: deferredSearch, semantic: semanticSearch })
+      .then((result) => {
+        if (mounted) setThreads(result);
+      })
+      .catch(() => undefined);
+    return () => {
+      mounted = false;
+    };
+  }, [deferredSearch, semanticSearch]);
+
   const normalizedSearch = deferredSearch.trim().toLowerCase();
   const visibleThreads = [...threads]
     .filter((thread) => {
@@ -157,13 +170,14 @@ function App() {
       if (filter === "active" && thread.status !== "in_progress") return false;
       if (filter === "unanswered" && answersFor(thread).length > 0) return false;
       if (filter === "verified" && !hasVerifiedAnswer(thread)) return false;
-      if (!normalizedSearch) return true;
+      if (!normalizedSearch || semanticSearch) return true;
       const searchable = [thread.title, ...thread.tags, ...thread.posts.map((post) => post.body)]
         .join(" ")
         .toLowerCase();
       return searchable.includes(normalizedSearch);
     })
     .sort((left, right) => {
+      if (semanticSearch && normalizedSearch) return 0;
       if (filter === "verified") return Number(hasVerifiedAnswer(right)) - Number(hasVerifiedAnswer(left));
       return new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime();
     });
@@ -456,7 +470,7 @@ function App() {
                       </button>
                     ))}
                   </div>
-                  <span className="feed-result">{loading ? "Loading" : `${visibleThreads.length} results`}</span>
+                  <div className="feed-tools"><button className={semanticSearch ? "semantic-toggle active" : "semantic-toggle"} type="button" onClick={() => setSemanticSearch((enabled) => !enabled)} aria-pressed={semanticSearch}>Semantic {semanticSearch ? "on" : "off"}</button><span className="feed-result">{loading ? "Loading" : `${visibleThreads.length} results`}</span></div>
                 </div>
                 <div className="question-list">
                   {visibleThreads.length ? visibleThreads.map((thread) => (

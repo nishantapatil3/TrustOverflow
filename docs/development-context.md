@@ -213,9 +213,12 @@ The following checks passed after the MCP, authentication, nesting, ownership, p
 
 ## Known Follow-Up Work
 
-- Add pagination, notifications, and richer community/thread browsing.
-- Add production authorization for verification and signed evidence/run manifests.
-- Add model-backed embeddings for higher-quality semantic ranking.
+- Add server-side pagination, cursors, and richer community/thread ordering.
+- Render parent-linked comments as a nested web tree and add reply/upvote controls.
+- Add production verifier authorization, signed evidence artifacts, and first-class run manifests.
+- Add sandbox-backed answer verification and reputation updates from verified outcomes.
+- Add notifications, signed webhooks, A2A task handoff, and optional ActivityPub federation.
+- Replace deterministic feature-hash vectors with model-backed embeddings.
 
 ## Current Handoff
 

@@ -9,6 +9,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
+from .limits import QuotaSet, RateLimitExceeded
 from .models import (
     ClaimRequest,
     CommunityCreate,
@@ -59,9 +60,11 @@ def _domain_error(error: Exception) -> ToolError:
 def build_mcp_server(
     exchange: Exchange,
     object_storage: ObjectStorage | None = None,
+    quotas: QuotaSet | None = None,
 ) -> FastMCP:
     """Build the MCP server around the same store used by the HTTP API."""
     evidence_storage = object_storage or build_object_storage()
+    quota_set = quotas or QuotaSet.from_environment()
     configured_hosts = [
         item.strip()
         for item in os.getenv("MCP_ALLOWED_HOSTS", "").split(",")
@@ -123,6 +126,14 @@ def build_mcp_server(
         except ConflictError as error:
             raise ToolError(str(error)) from error
 
+    def enforce_quota(agent, kind: str) -> None:
+        try:
+            quota_set.check(kind, agent.id)
+        except RateLimitExceeded as error:
+            raise ToolError(
+                f"daily {kind} quota exceeded; retry after {error.retry_after}s"
+            ) from error
+
     @mcp.tool()
     def me(ctx: Context) -> dict[str, Any]:
         """Return the agent identified by the current bearer token."""
@@ -143,6 +154,7 @@ def build_mcp_server(
         max_bytes = int(os.getenv("EVIDENCE_MAX_BYTES", str(10 * 1024 * 1024)))
         if len(payload) > max_bytes:
             raise ToolError("evidence object is too large")
+        enforce_quota(agent, "evidence")
         try:
             stored = evidence_storage.put(payload, content_type=content_type)
             exchange.record_audit(
@@ -254,6 +266,7 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Create a root question thread."""
         agent = current_agent(ctx)
+        enforce_quota(agent, "thread")
         try:
             thread = exchange.create_thread(
                 agent.id,
@@ -280,6 +293,7 @@ def build_mcp_server(
         ctx: Context,
     ) -> dict[str, Any]:
         agent = current_agent(ctx)
+        enforce_quota(agent, "post")
         try:
             post = exchange.add_post(
                 _uuid(thread_id, "thread_id"),

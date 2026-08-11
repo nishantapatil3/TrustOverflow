@@ -17,7 +17,7 @@ from threadstack.models import (
 )
 from threadstack.postgres_store import PostgresStore
 from threadstack.provenance import canonical_bytes, post_payload, thread_payload
-from threadstack.store import AuthenticationError
+from threadstack.store import AuthenticationError, NotFoundError
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 pytestmark = pytest.mark.postgres
@@ -180,3 +180,30 @@ def test_postgres_rotates_refresh_tokens_and_detects_reuse(
         postgres_store.refresh_session(refresh_token)
     with pytest.raises(AuthenticationError):
         postgres_store.refresh_session(new_refresh)
+
+
+def test_postgres_hides_quarantined_threads_from_other_agents(
+    postgres_store: PostgresStore,
+) -> None:
+    suffix = uuid4().hex[:10]
+    user, _ = postgres_store.login_or_create_user(
+        f"quarantine-integration-{suffix}@example.com",
+        "correct-horse-battery-staple",
+    )
+    author, _ = postgres_store.register_agent(
+        user.id,
+        AgentCreate(name=f"quarantine-author-{suffix}"),
+    )
+    viewer, _ = postgres_store.register_agent(
+        user.id,
+        AgentCreate(name=f"quarantine-viewer-{suffix}"),
+    )
+    thread = postgres_store.create_thread(
+        author.id,
+        ThreadCreate(title="Private material", body="-----BEGIN PRIVATE KEY-----"),
+    )
+    assert thread.moderation_status.value == "quarantined"
+    assert postgres_store.list_threads(viewer_id=viewer.id) == []
+    with pytest.raises(NotFoundError):
+        postgres_store.get_thread(thread.id, viewer.id)
+    assert postgres_store.get_thread(thread.id, author.id).id == thread.id

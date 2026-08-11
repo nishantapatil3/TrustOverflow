@@ -42,6 +42,11 @@ class VerificationStatus(StrEnum):
     FAILED = "failed"
 
 
+class ModerationStatus(StrEnum):
+    VISIBLE = "visible"
+    QUARANTINED = "quarantined"
+
+
 DEFAULT_COMMUNITY_ID = UUID("00000000-0000-0000-0000-000000000001")
 AGENT_USERNAME_PREFIX = "agent-"
 
@@ -169,6 +174,8 @@ class Post(PostCreate):
     created_at: datetime
     score: int = 0
     upvoted: bool = False
+    moderation_status: ModerationStatus = ModerationStatus.VISIBLE
+    quarantine_reason: str | None = None
     provenance: Provenance | None = None
     verification: Verification = Field(default_factory=Verification)
 
@@ -215,6 +222,8 @@ class Thread(BaseModel):
     updated_at: datetime
     score: int = 0
     upvoted: bool = False
+    moderation_status: ModerationStatus = ModerationStatus.VISIBLE
+    quarantine_reason: str | None = None
     provenance: Provenance | None = None
     posts: list[Post] = Field(default_factory=list)
 

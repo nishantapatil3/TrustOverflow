@@ -20,6 +20,7 @@ from .models import (
     ClaimRequest,
     Community,
     CommunityCreate,
+    ModerationStatus,
     Post,
     PostCreate,
     PostType,
@@ -35,6 +36,7 @@ from .models import (
     agent_username,
     community_slug,
 )
+from .moderation import quarantine_reason
 from .provenance import (
     build_provenance,
     post_payload,
@@ -202,13 +204,23 @@ class ExchangeStore:
         )
 
     def _thread_view(self, thread: Thread, viewer_id: UUID | None = None) -> Thread:
+        if (
+            thread.moderation_status is ModerationStatus.QUARANTINED
+            and viewer_id != thread.author_id
+        ):
+            raise NotFoundError(f"thread {thread.id} was not found")
         upvoters = self._thread_upvotes.get(thread.id, set())
+        visible_posts = [
+            post
+            for post in thread.posts
+            if post.moderation_status is ModerationStatus.VISIBLE or post.author_id == viewer_id
+        ]
         return thread.model_copy(
             deep=True,
             update={
                 "score": len(upvoters),
                 "upvoted": viewer_id in upvoters if viewer_id is not None else False,
-                "posts": [self._post_view(post, viewer_id) for post in thread.posts],
+                "posts": [self._post_view(post, viewer_id) for post in visible_posts],
             },
         )
 
@@ -489,6 +501,7 @@ class ExchangeStore:
             community_id = data.community_id or DEFAULT_COMMUNITY_ID
             self.require_community(community_id)
             normalized_tags = sorted({tag.casefold() for tag in data.tags})
+            quarantine = quarantine_reason(text=[data.title, data.body])
             provenance = build_provenance(
                 signer_id=author_id,
                 public_key=author.public_key,
@@ -509,6 +522,12 @@ class ExchangeStore:
                 author_id=author_id,
                 created_at=now,
                 updated_at=now,
+                moderation_status=(
+                    ModerationStatus.QUARANTINED
+                    if quarantine
+                    else ModerationStatus.VISIBLE
+                ),
+                quarantine_reason=quarantine,
                 provenance=provenance,
             )
             root_post = Post(
@@ -518,12 +537,14 @@ class ExchangeStore:
                 type=PostType.QUESTION,
                 body=data.body,
                 created_at=now,
+                moderation_status=thread.moderation_status,
+                quarantine_reason=quarantine,
             )
             thread.posts.append(root_post)
             self._threads[thread.id] = thread
             self._posts[root_post.id] = root_post
             self._record_audit(author_id, "thread.created", "thread", thread.id)
-            return self._thread_view(thread)
+            return self._thread_view(thread, author_id)
 
     def list_threads(
         self,
@@ -539,6 +560,11 @@ class ExchangeStore:
             normalized_tag = tag.casefold() if tag else None
             threads = []
             for thread in self._threads.values():
+                if (
+                    thread.moderation_status is ModerationStatus.QUARANTINED
+                    and viewer_id != thread.author_id
+                ):
+                    continue
                 if status is not None and thread.status is not status:
                     continue
                 if community_id is not None and thread.community_id != community_id:
@@ -568,6 +594,11 @@ class ExchangeStore:
         with self._lock:
             thread = self.require_thread(thread_id)
             author = self.require_agent(author_id)
+            if (
+                thread.moderation_status is ModerationStatus.QUARANTINED
+                and thread.author_id != author_id
+            ):
+                raise NotFoundError(f"thread {thread_id} was not found")
             if thread.status in {ThreadStatus.RESOLVED, ThreadStatus.CLOSED}:
                 raise ConflictError("cannot add a post to a resolved or closed thread")
             if data.parent_id is not None:
@@ -590,12 +621,19 @@ class ExchangeStore:
                     confidence=data.confidence,
                 ),
             )
+            quarantine = quarantine_reason(text=[data.body], evidence=data.evidence)
             post = Post(
                 id=uuid4(),
                 thread_id=thread_id,
                 author_id=author_id,
                 created_at=utc_now(),
                 **data.model_dump(),
+                moderation_status=(
+                    ModerationStatus.QUARANTINED
+                    if quarantine
+                    else ModerationStatus.VISIBLE
+                ),
+                quarantine_reason=quarantine,
                 provenance=provenance,
             )
             thread.posts.append(post)
@@ -621,6 +659,7 @@ class ExchangeStore:
             body = data.body if data.body is not None else post.body
             evidence = data.evidence if data.evidence is not None else post.evidence
             confidence = data.confidence if data.confidence is not None else post.confidence
+            quarantine = quarantine_reason(text=[body], evidence=evidence)
             provenance = build_provenance(
                 signer_id=author_id,
                 public_key=author.public_key,
@@ -643,6 +682,10 @@ class ExchangeStore:
             if data.confidence is not None:
                 post.confidence = data.confidence
             post.signature = data.signature
+            post.moderation_status = (
+                ModerationStatus.QUARANTINED if quarantine else ModerationStatus.VISIBLE
+            )
+            post.quarantine_reason = quarantine
             post.provenance = provenance
             thread = self.require_thread(post.thread_id)
             thread.updated_at = utc_now()
@@ -706,6 +749,7 @@ class ExchangeStore:
                 None,
             )
             body = data.body if data.body is not None else (root_post.body if root_post else "")
+            quarantine = quarantine_reason(text=[title, body])
             provenance = build_provenance(
                 signer_id=author_id,
                 public_key=author.public_key,
@@ -725,6 +769,13 @@ class ExchangeStore:
                 if root_post is None:
                     raise ConflictError("thread has no root post")
                 root_post.body = changes["body"]
+            thread.moderation_status = (
+                ModerationStatus.QUARANTINED if quarantine else ModerationStatus.VISIBLE
+            )
+            thread.quarantine_reason = quarantine
+            if root_post is not None:
+                root_post.moderation_status = thread.moderation_status
+                root_post.quarantine_reason = quarantine
             thread.provenance = provenance
             thread.updated_at = utc_now()
             self._record_audit(author_id, "thread.updated", "thread", thread_id)

@@ -29,6 +29,7 @@ from .models import (
     Community,
     CommunityCreate,
     EvidenceRef,
+    ModerationStatus,
     Post,
     PostCreate,
     PostType,
@@ -45,6 +46,7 @@ from .models import (
     agent_username,
     community_slug,
 )
+from .moderation import quarantine_reason
 from .provenance import (
     build_provenance,
     post_payload,
@@ -212,6 +214,8 @@ class PostgresStore:
             created_at=row["created_at"],
             score=int(row.get("score") or 0),
             upvoted=upvoted,
+            moderation_status=row.get("moderation_status", ModerationStatus.VISIBLE.value),
+            quarantine_reason=row.get("quarantine_reason"),
             provenance=provenance,
             verification=Verification(
                 status=row["verification_status"],
@@ -288,6 +292,11 @@ class PostgresStore:
         row: dict[str, Any],
         viewer_id: UUID | None = None,
     ) -> Thread:
+        if (
+            row.get("moderation_status") == ModerationStatus.QUARANTINED.value
+            and row["author_id"] != viewer_id
+        ):
+            raise NotFoundError(f"thread {row['id']} was not found")
         post_rows = connection.execute(
             """
             SELECT
@@ -307,12 +316,15 @@ class PostgresStore:
                 signature,
                 payload_hash,
                 signature_valid,
+                moderation_status,
+                quarantine_reason,
                 (SELECT COUNT(*)::int FROM upvotes WHERE upvotes.post_id = posts.id) AS score
             FROM posts
             WHERE thread_id = %s
+              AND (moderation_status = %s OR author_id = %s)
             ORDER BY created_at, id
             """,
-            (row["id"],),
+            (row["id"], ModerationStatus.VISIBLE.value, viewer_id),
         ).fetchall()
         provenance = (
             Provenance(
@@ -337,6 +349,8 @@ class PostgresStore:
             updated_at=row["updated_at"],
             score=int(row.get("score") or 0),
             upvoted=self._has_upvote(connection, viewer_id, thread_id=row["id"]),
+            moderation_status=row.get("moderation_status", ModerationStatus.VISIBLE.value),
+            quarantine_reason=row.get("quarantine_reason"),
             provenance=provenance,
             posts=[
                 self._post_from_row(
@@ -840,6 +854,7 @@ class PostgresStore:
         with self._connection() as connection:
             author = self._require_agent(connection, author_id)
             self._require_community(connection, community_id)
+            quarantine = quarantine_reason(text=[data.title, data.body])
             provenance = build_provenance(
                 signer_id=author_id,
                 public_key=author.public_key,
@@ -855,8 +870,8 @@ class PostgresStore:
                 """
                 INSERT INTO threads (
                     id, community_id, title, tags, status, author_id, created_at, updated_at,
-                    signature, payload_hash, signature_valid
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    signature, payload_hash, signature_valid, moderation_status, quarantine_reason
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     thread_id,
@@ -870,14 +885,20 @@ class PostgresStore:
                     provenance.signature,
                     provenance.payload_hash,
                     provenance.verified,
+                    (
+                        ModerationStatus.QUARANTINED.value
+                        if quarantine
+                        else ModerationStatus.VISIBLE.value
+                    ),
+                    quarantine,
                 ),
             )
             connection.execute(
                 """
                 INSERT INTO posts (
                     id, thread_id, author_id, post_type, body, evidence,
-                    confidence, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    confidence, created_at, moderation_status, quarantine_reason
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     post_id,
@@ -888,6 +909,12 @@ class PostgresStore:
                     Jsonb([]),
                     0.5,
                     now,
+                    (
+                        ModerationStatus.QUARANTINED.value
+                        if quarantine
+                        else ModerationStatus.VISIBLE.value
+                    ),
+                    quarantine,
                 ),
             )
             self._record_audit(connection, author_id, "thread.created", "thread", thread_id)
@@ -906,8 +933,10 @@ class PostgresStore:
         community_id: UUID | None = None,
         viewer_id: UUID | None = None,
     ) -> list[Thread]:
-        conditions = ["TRUE"]
-        parameters: list[Any] = []
+        conditions = [
+            "(moderation_status = %s OR author_id = %s)"
+        ]
+        parameters: list[Any] = [ModerationStatus.VISIBLE.value, viewer_id]
         if community_id is not None:
             conditions.append("community_id = %s")
             parameters.append(community_id)
@@ -919,11 +948,17 @@ class PostgresStore:
             parameters.append(Jsonb([tag.casefold()]))
         if query:
             pattern = f"%{query.casefold()}%"
+            post_visibility = "posts.moderation_status = %s"
+            post_parameters: list[Any] = [ModerationStatus.VISIBLE.value]
+            if viewer_id is not None:
+                post_visibility = "(posts.moderation_status = %s OR posts.author_id = %s)"
+                post_parameters.append(viewer_id)
             conditions.append(
                 "(title ILIKE %s OR tags::text ILIKE %s OR EXISTS ("
-                "SELECT 1 FROM posts WHERE posts.thread_id = threads.id AND body ILIKE %s))"
+                f"SELECT 1 FROM posts WHERE posts.thread_id = threads.id AND {post_visibility} "
+                "AND body ILIKE %s))"
             )
-            parameters.extend([pattern, pattern, pattern])
+            parameters.extend([pattern, pattern, *post_parameters, pattern])
 
         with self._connection() as connection:
             rows = connection.execute(
@@ -954,6 +989,11 @@ class PostgresStore:
         with self._connection() as connection:
             thread = self._require_thread(connection, thread_id, for_update=True)
             author = self._require_agent(connection, author_id)
+            if (
+                thread["moderation_status"] == ModerationStatus.QUARANTINED.value
+                and thread["author_id"] != author_id
+            ):
+                raise NotFoundError(f"thread {thread_id} was not found")
             if thread["status"] in {ThreadStatus.RESOLVED.value, ThreadStatus.CLOSED.value}:
                 raise ConflictError("cannot add a post to a resolved or closed thread")
             if data.parent_id is not None:
@@ -978,12 +1018,14 @@ class PostgresStore:
                     confidence=data.confidence,
                 ),
             )
+            quarantine = quarantine_reason(text=[data.body], evidence=data.evidence)
             connection.execute(
                 """
                 INSERT INTO posts (
                     id, thread_id, author_id, parent_id, post_type, body, evidence,
-                    confidence, created_at, signature, payload_hash, signature_valid
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    confidence, created_at, signature, payload_hash, signature_valid,
+                    moderation_status, quarantine_reason
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     post_id,
@@ -998,6 +1040,12 @@ class PostgresStore:
                     provenance.signature,
                     provenance.payload_hash,
                     provenance.verified,
+                    (
+                        ModerationStatus.QUARANTINED.value
+                        if quarantine
+                        else ModerationStatus.VISIBLE.value
+                    ),
+                    quarantine,
                 ),
             )
             connection.execute(
@@ -1030,6 +1078,7 @@ class PostgresStore:
             )
             body = data.body if data.body is not None else post["body"]
             confidence = data.confidence if data.confidence is not None else post["confidence"]
+            quarantine = quarantine_reason(text=[body], evidence=evidence_refs)
             provenance = build_provenance(
                 signer_id=author_id,
                 public_key=author.public_key,
@@ -1063,10 +1112,22 @@ class PostgresStore:
                     "signature = %s",
                     "payload_hash = %s",
                     "signature_valid = %s",
+                    "moderation_status = %s",
+                    "quarantine_reason = %s",
                 ]
             )
             parameters.extend(
-                [provenance.signature, provenance.payload_hash, provenance.verified]
+                [
+                    provenance.signature,
+                    provenance.payload_hash,
+                    provenance.verified,
+                    (
+                        ModerationStatus.QUARANTINED.value
+                        if quarantine
+                        else ModerationStatus.VISIBLE.value
+                    ),
+                    quarantine,
+                ]
             )
             parameters.append(post_id)
             connection.execute(
@@ -1148,6 +1209,7 @@ class PostgresStore:
                 else thread["tags"] or []
             )
             body = data.body if data.body is not None else root["body"]
+            quarantine = quarantine_reason(text=[title, body])
             provenance = build_provenance(
                 signer_id=author_id,
                 public_key=author.public_key,
@@ -1172,6 +1234,8 @@ class PostgresStore:
                     "signature = %s",
                     "payload_hash = %s",
                     "signature_valid = %s",
+                    "moderation_status = %s",
+                    "quarantine_reason = %s",
                     "updated_at = %s",
                 ]
             )
@@ -1180,6 +1244,12 @@ class PostgresStore:
                     provenance.signature,
                     provenance.payload_hash,
                     provenance.verified,
+                    (
+                        ModerationStatus.QUARANTINED.value
+                        if quarantine
+                        else ModerationStatus.VISIBLE.value
+                    ),
+                    quarantine,
                     now,
                     thread_id,
                 ]
@@ -1190,8 +1260,34 @@ class PostgresStore:
             )
             if "body" in changes:
                 connection.execute(
-                    "UPDATE posts SET body = %s WHERE id = %s",
-                    (changes["body"], root["id"]),
+                    """
+                    UPDATE posts
+                    SET body = %s, moderation_status = %s, quarantine_reason = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        changes["body"],
+                        ModerationStatus.QUARANTINED.value
+                        if quarantine
+                        else ModerationStatus.VISIBLE.value,
+                        quarantine,
+                        root["id"],
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE posts
+                    SET moderation_status = %s, quarantine_reason = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        ModerationStatus.QUARANTINED.value
+                        if quarantine
+                        else ModerationStatus.VISIBLE.value,
+                        quarantine,
+                        root["id"],
+                    ),
                 )
             self._record_audit(connection, author_id, "thread.updated", "thread", thread_id)
             return self._thread_from_row(

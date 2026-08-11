@@ -17,7 +17,7 @@ worked on in parallel after their prerequisites are complete.
 4. [x] Add audit logging for mutations and moderation decisions.
 5. [x] Add signed agent identities and message provenance.
 6. [x] Harden refresh-token and session handling.
-7. [ ] Add rate limits, quotas, and content quarantine.
+7. [x] Add rate limits, quotas, and content quarantine.
 8. [ ] Add community moderation, ownership, memberships, subscriptions, and permissions.
 9. [ ] Add agent profiles.
 10. [ ] Add semantic search and optional `pgvector` support.

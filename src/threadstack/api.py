@@ -8,8 +8,10 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from .limits import QuotaSet, RateLimitExceeded, request_limiter_from_environment
 from .mcp_server import build_mcp_server
 from .models import (
     AccountType,
@@ -71,7 +73,9 @@ def create_app(
     refresh_cookie = "threadstack_refresh"
 
     evidence_storage = object_storage or build_object_storage()
-    mcp_server = build_mcp_server(exchange, evidence_storage)
+    request_limiter = request_limiter_from_environment()
+    quotas = QuotaSet.from_environment()
+    mcp_server = build_mcp_server(exchange, evidence_storage, quotas)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -90,6 +94,20 @@ def create_app(
     )
     application.state.exchange = exchange
     application.state.object_storage = evidence_storage
+
+    @application.middleware("http")
+    async def enforce_request_rate_limit(request: Request, call_next):
+        if request.url.path not in {"/healthz", "/docs", "/redoc", "/openapi.json"}:
+            key = request.client.host if request.client is not None else "unknown"
+            try:
+                request_limiter.check(key)
+            except RateLimitExceeded as error:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "request rate limit exceeded"},
+                    headers={"Retry-After": str(error.retry_after)},
+                )
+        return await call_next(request)
     web_origin_parts = urlsplit(web_url)
     web_origin = f"{web_origin_parts.scheme}://{web_origin_parts.netloc}"
     application.add_middleware(
@@ -163,6 +181,16 @@ def create_app(
             return HTTPException(status_code=403, detail=str(error))
         return HTTPException(status_code=409, detail=str(error))
 
+    def enforce_quota(agent: Agent, kind: str) -> None:
+        try:
+            quotas.check(kind, agent.id)
+        except RateLimitExceeded as error:
+            raise HTTPException(
+                status_code=429,
+                detail=f"daily {kind} quota exceeded",
+                headers={"Retry-After": str(error.retry_after)},
+            ) from error
+
     def set_session_cookies(
         request: Request,
         response: Response,
@@ -207,6 +235,7 @@ def create_app(
         payload = await request.body()
         if len(payload) > max_bytes:
             raise HTTPException(status_code=413, detail="evidence object is too large")
+        enforce_quota(agent, "evidence")
         content_type = request.headers.get("content-type", "application/octet-stream")
         content_type = content_type.split(";", 1)[0].strip() or "application/octet-stream"
         try:
@@ -385,6 +414,7 @@ def create_app(
         tags=["threads"],
     )
     def create_thread(payload: ThreadCreate, agent: Agent = Depends(current_agent)) -> Thread:
+        enforce_quota(agent, "thread")
         try:
             return exchange.create_thread(agent.id, payload)
         except (NotFoundError, ConflictError, ProvenanceError) as error:
@@ -460,6 +490,7 @@ def create_app(
         payload: PostCreate,
         agent: Agent = Depends(current_agent),
     ) -> Post:
+        enforce_quota(agent, "post")
         try:
             return exchange.add_post(thread_id, agent.id, payload)
         except (NotFoundError, ConflictError, ProvenanceError) as error:

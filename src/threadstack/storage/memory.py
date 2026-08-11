@@ -1,18 +1,31 @@
 from __future__ import annotations
 
-import hashlib
 import hmac
-import re
 import secrets
-from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from threading import RLock
 from typing import Any
 from uuid import UUID, uuid4
 
-from .expertise import route_experts as rank_experts
-from .models import (
+from ..auth import (
+    ACCESS_SESSION_TTL,
+    REFRESH_SESSION_TTL,
+    digest_secret,
+    email_username,
+    hash_password,
+    normalize_email,
+    utc_now,
+    verify_password,
+)
+from ..errors import (
+    AuthenticationError,
+    ConflictError,
+    NotFoundError,
+    PermissionDeniedError,
+)
+from ..expertise import route_experts as rank_experts
+from ..models import (
     DEFAULT_COMMUNITY_ID,
     AccountType,
     Agent,
@@ -44,34 +57,14 @@ from .models import (
     agent_username,
     community_slug,
 )
-from .moderation import quarantine_reason
-from .provenance import (
+from ..moderation import quarantine_reason
+from ..provenance import (
     build_provenance,
     post_payload,
     thread_payload,
     validate_public_key,
 )
-from .semantic import cosine_similarity, embed_text, thread_search_text
-
-
-class StoreError(Exception):
-    """Base class for domain errors raised by the exchange store."""
-
-
-class NotFoundError(StoreError):
-    pass
-
-
-class ConflictError(StoreError):
-    pass
-
-
-class AuthenticationError(StoreError):
-    pass
-
-
-class PermissionDeniedError(StoreError):
-    pass
+from ..semantic import cosine_similarity, embed_text, thread_search_text
 
 
 @dataclass
@@ -88,68 +81,6 @@ class Session:
 class PasswordReset:
     user_id: UUID
     expires_at: datetime
-
-
-ACCESS_SESSION_TTL = timedelta(minutes=15)
-REFRESH_SESSION_TTL = timedelta(days=30)
-
-
-def utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
-def digest_secret(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def normalize_email(value: str) -> str:
-    return value.strip().casefold()
-
-
-def hash_password(password: str) -> str:
-    salt = secrets.token_bytes(16)
-    password_digest = hashlib.scrypt(
-        password.encode("utf-8"),
-        salt=salt,
-        n=2**14,
-        r=8,
-        p=1,
-        dklen=32,
-    )
-    return "$".join(
-        (
-            "scrypt",
-            urlsafe_b64encode(salt).decode("ascii"),
-            urlsafe_b64encode(password_digest).decode("ascii"),
-        )
-    )
-
-
-def verify_password(password: str, encoded: str) -> bool:
-    try:
-        algorithm, encoded_salt, encoded_digest = encoded.split("$", 2)
-        if algorithm != "scrypt":
-            return False
-        salt = urlsafe_b64decode(encoded_salt.encode("ascii"))
-        expected = urlsafe_b64decode(encoded_digest.encode("ascii"))
-        candidate = hashlib.scrypt(
-            password.encode("utf-8"),
-            salt=salt,
-            n=2**14,
-            r=8,
-            p=1,
-            dklen=len(expected),
-        )
-        return hmac.compare_digest(expected, candidate)
-    except (ValueError, TypeError):
-        return False
-
-
-def email_username(email: str) -> str:
-    local_part = email.partition("@")[0]
-    stem = re.sub(r"[^a-z0-9._-]+", "-", local_part.casefold()).strip("-._") or "user"
-    suffix = digest_secret(email)[:8]
-    return f"{stem[:60]}-{suffix}"
 
 
 class ExchangeStore:

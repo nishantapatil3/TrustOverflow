@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 
 from threadstack.api import create_app
 from threadstack.models import AgentCreate
-from threadstack.store import ExchangeStore
+from threadstack.storage.memory import ExchangeStore
 
 MCP_HEADERS = {
     "accept": "application/json",

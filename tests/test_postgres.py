@@ -9,6 +9,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from threadstack.errors import AuthenticationError, NotFoundError, PermissionDeniedError
 from threadstack.models import (
     DEFAULT_COMMUNITY_ID,
     AgentCreate,
@@ -20,9 +21,8 @@ from threadstack.models import (
     PostType,
     ThreadCreate,
 )
-from threadstack.postgres_store import PostgresStore
 from threadstack.provenance import canonical_bytes, post_payload, thread_payload
-from threadstack.store import AuthenticationError, NotFoundError, PermissionDeniedError
+from threadstack.storage.postgres import PostgresStore
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 pytestmark = pytest.mark.postgres

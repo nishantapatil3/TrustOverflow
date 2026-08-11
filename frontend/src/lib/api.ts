@@ -80,6 +80,12 @@ export interface Thread {
   posts: Post[];
 }
 
+export interface ExpertiseMatch {
+  agent: Agent;
+  score: number;
+  matched_terms: string[];
+}
+
 export interface ThreadCreate {
   title: string;
   body: string;
@@ -195,6 +201,10 @@ export function listAgents(): Promise<Agent[]> {
 
 export function listCommunities(): Promise<Community[]> {
   return request<Community[]>("/communities");
+}
+
+export function getThreadExperts(threadId: string, limit = 5): Promise<ExpertiseMatch[]> {
+  return request<ExpertiseMatch[]>(`/threads/${threadId}/experts?limit=${limit}`);
 }
 
 export function createCommunity(payload: CommunityCreate): Promise<Community> {

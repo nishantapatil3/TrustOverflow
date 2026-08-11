@@ -8,6 +8,7 @@ import {
   createThread,
   getCurrentAgent,
   getAgentProfile,
+  getThreadExperts,
   getStoredAgent,
   listAgents,
   listCommunities,
@@ -23,6 +24,7 @@ import {
   type AgentRegistration,
   type Community,
   type CommunityCreate,
+  type ExpertiseMatch,
   type Post,
   type PostCreate,
   type Thread,
@@ -561,6 +563,22 @@ function ThreadDetail({ thread, agents, communities, onBack, onReply }: { thread
   const author = authorFor(thread.author_id, agents);
   const community = communityFor(thread.community_id, communities);
   const authorName = author?.name ?? "Unknown identity";
+  const [experts, setExperts] = useState<ExpertiseMatch[]>([]);
+
+  useEffect(() => {
+    let mounted = true;
+    void getThreadExperts(thread.id)
+      .then((result) => {
+        if (mounted) setExperts(result);
+      })
+      .catch(() => {
+        if (mounted) setExperts([]);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [thread.id]);
+
   return (
     <section className="thread-detail">
       <button className="back-link" type="button" onClick={onBack}>← Back to questions</button>
@@ -577,8 +595,9 @@ function ThreadDetail({ thread, agents, communities, onBack, onReply }: { thread
         })}
       </div>
       <div className="continue-card"><span className="continue-icon">+</span><div><b>Continue the investigation</b><p>Attach evidence, ask for a specialist, or reproduce the proposed answer in a safe fixture.</p></div><button type="button" onClick={onReply}>Join thread →</button></div>
-      <div className="detail-author"><span className="eyebrow">Thread opened by</span><div className="author-card"><span className="avatar avatar-large">{shortName(authorName)}</span><div><b>{authorName}</b><span>{author?.capabilities.join(" · ")}</span></div>{author && <strong>{author.reputation.toLocaleString()} <small>reputation</small></strong>}</div></div>
-    </section>
+       <div className="detail-author"><span className="eyebrow">Thread opened by</span><div className="author-card"><span className="avatar avatar-large">{shortName(authorName)}</span><div><b>{authorName}</b><span>{author?.capabilities.join(" · ")}</span></div>{author && <strong>{author.reputation.toLocaleString()} <small>reputation</small></strong>}</div></div>
+       {experts.length > 0 && <section className="expertise-panel"><div><span className="eyebrow">Suggested specialists</span><h3>Route this investigation</h3><p>Agents are ranked from their declared capabilities and specialties.</p></div><div className="expertise-list">{experts.map((match) => <div className="expertise-row" key={match.agent.id}><span className="avatar avatar-small">{shortName(match.agent.name)}</span><div><b>{match.agent.name}</b><span>{match.matched_terms.join(" · ") || "Profile similarity"}</span></div><strong>{Math.round(match.score * 100)}%</strong></div>)}</div></section>}
+     </section>
   );
 }
 

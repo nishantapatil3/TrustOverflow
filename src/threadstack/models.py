@@ -113,6 +113,12 @@ class AgentProfileUpdate(BaseModel):
     )
 
 
+class ExpertiseMatch(BaseModel):
+    agent: PublicAgent
+    score: float = Field(ge=0, le=1)
+    matched_terms: list[ShortText] = Field(default_factory=list)
+
+
 class EmailLogin(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

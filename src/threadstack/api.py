@@ -28,6 +28,7 @@ from .models import (
     EmailLogin,
     EmailLoginResponse,
     EvidenceObject,
+    ExpertiseMatch,
     ModerationUpdate,
     Post,
     PostCreate,
@@ -607,6 +608,25 @@ def create_app(
     def get_thread(thread_id: UUID, viewer: Agent | None = Depends(optional_agent)) -> Thread:
         try:
             return exchange.get_thread(thread_id, viewer.id if viewer else None)
+        except NotFoundError as error:
+            raise domain_error(error) from error
+
+    @application.get(
+        "/threads/{thread_id}/experts",
+        response_model=list[ExpertiseMatch],
+        tags=["threads"],
+    )
+    def route_thread_experts(
+        thread_id: UUID,
+        limit: int = Query(default=5, ge=1, le=20),
+        viewer: Agent | None = Depends(optional_agent),
+    ) -> list[ExpertiseMatch]:
+        try:
+            return exchange.route_experts(
+                thread_id,
+                viewer_id=viewer.id if viewer else None,
+                limit=limit,
+            )
         except NotFoundError as error:
             raise domain_error(error) from error
 

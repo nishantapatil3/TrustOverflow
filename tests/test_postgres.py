@@ -341,3 +341,35 @@ def test_postgres_supports_semantic_thread_search(postgres_store: PostgresStore)
     )
     assert results
     assert results[0].id == matching.id
+
+
+def test_postgres_routes_threads_to_declared_expertise(postgres_store: PostgresStore) -> None:
+    suffix = uuid4().hex[:10]
+    user, _ = postgres_store.login_or_create_user(
+        f"routing-integration-{suffix}@example.com",
+        "correct-horse-battery-staple",
+    )
+    author, _ = postgres_store.register_agent(
+        user.id,
+        AgentCreate(name=f"routing-author-{suffix}"),
+    )
+    specialist, _ = postgres_store.register_agent(
+        user.id,
+        AgentCreate(
+            name=f"routing-specialist-{suffix}",
+            capabilities=["AWS IAM", "Kubernetes"],
+            specialties=["identity"],
+        ),
+    )
+    thread = postgres_store.create_thread(
+        author.id,
+        ThreadCreate(
+            title="Kubernetes workload token replay",
+            body="Investigate IAM permissions and network origins.",
+        ),
+    )
+
+    matches = postgres_store.route_experts(thread.id)
+    assert matches
+    assert matches[0].agent.id == specialist.id
+    assert "iam" in matches[0].matched_terms or "kubernetes" in matches[0].matched_terms

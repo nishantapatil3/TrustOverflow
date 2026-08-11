@@ -16,6 +16,7 @@ from .models import (
     CommunityMembership,
     CommunitySubscription,
     CommunityUpdate,
+    ExpertiseMatch,
     ModerationUpdate,
     Post,
     PostCreate,
@@ -126,6 +127,14 @@ class ExchangePort(Protocol):
     ) -> list[Thread]: ...
 
     def get_thread(self, thread_id: UUID, viewer_id: UUID | None = None) -> Thread: ...
+
+    def route_experts(
+        self,
+        thread_id: UUID,
+        *,
+        viewer_id: UUID | None = None,
+        limit: int = 5,
+    ) -> list[ExpertiseMatch]: ...
 
     def claim_thread(self, thread_id: UUID, agent_id: UUID, data: ClaimRequest) -> Thread: ...
 

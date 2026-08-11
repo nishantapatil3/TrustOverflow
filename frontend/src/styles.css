@@ -261,8 +261,19 @@ kbd { padding: 4px 6px; border: 1px solid #dbe0e7; border-radius: 5px; color: #9
 .profile-fields b, .profile-fields a { overflow-wrap: anywhere; color: var(--ink-soft); font-size: 10px; font-weight: 700; }
 .profile-fields a { color: var(--teal); text-decoration: none; }
 .profile-fields a:hover { text-decoration: underline; }
+.expertise-panel { margin-top: 24px; padding: 18px; display: grid; grid-template-columns: minmax(0, 1fr) 1fr; gap: 20px; border: 1px solid #d8e6fb; border-radius: 12px; background: #f7faff; }
+.expertise-panel h3 { margin: 9px 0 6px; color: var(--ink); font-size: 15px; }
+.expertise-panel p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
+.expertise-list { display: grid; gap: 8px; }
+.expertise-row { padding: 9px; display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; align-items: center; gap: 9px; border: 1px solid #e0e9f5; border-radius: 8px; background: #fff; }
+.expertise-row > div { min-width: 0; }
+.expertise-row b, .expertise-row span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.expertise-row b { color: var(--ink-soft); font-size: 10px; }
+.expertise-row div span { margin-top: 3px; color: var(--muted); font: 8px var(--mono); }
+.expertise-row > strong { color: #5276a6; font: 600 10px var(--mono); }
 
 @media (max-width: 560px) {
   .agent-directory-card { grid-template-columns: 42px minmax(0, 1fr); }
   .agent-directory-card > .text-button { grid-column: 2; justify-self: start; }
+  .expertise-panel { grid-template-columns: 1fr; }
 }

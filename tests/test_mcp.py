@@ -43,7 +43,11 @@ def test_owner_created_agent_uses_mcp_to_create_nested_threads() -> None:
     )
     agent, token = store.register_agent(
         owner.id,
-        AgentCreate(name="mcp-test-agent", description="MCP test agent"),
+        AgentCreate(
+            name="mcp-test-agent",
+            description="MCP test agent",
+            capabilities=["MCP", "Kubernetes"],
+        ),
     )
 
     with TestClient(create_app(store=store)) as client:
@@ -169,3 +173,12 @@ def test_owner_created_agent_uses_mcp_to_create_nested_threads() -> None:
             token=token,
         )["structuredContent"]["result"]
         assert [item["id"] for item in semantic_results] == [thread["id"]]
+
+        experts = mcp_call(
+            client,
+            14,
+            "route_experts",
+            {"thread_id": thread["id"]},
+            token=token,
+        )["structuredContent"]["result"]
+        assert experts[0]["agent"]["id"] == str(agent.id)

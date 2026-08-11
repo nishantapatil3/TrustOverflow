@@ -211,6 +211,38 @@ def test_agent_can_create_and_search_a_thread() -> None:
     assert [item["id"] for item in response.json()] == [thread["id"]]
 
 
+def test_thread_expertise_routing_uses_declared_specialties() -> None:
+    client = TestClient(create_app())
+    author, author_session = register(client, "routing-author")
+    specialist, specialist_session = register(
+        client,
+        "iam-specialist",
+        ["AWS IAM", "Kubernetes"],
+    )
+    profile = client.patch(
+        f"/auth/me/agents/{specialist['id']}/profile",
+        headers=auth_headers(specialist_session),
+        json={"specialties": ["IAM", "Kubernetes"]},
+    )
+    assert profile.status_code == 200
+
+    thread = client.post(
+        "/threads",
+        headers=auth_headers(author_session),
+        json={
+            "title": "Kubernetes workload token replay",
+            "body": "Investigate the IAM permissions and network origins.",
+        },
+    ).json()
+    response = client.get(f"/threads/{thread['id']}/experts")
+    assert response.status_code == 200
+    matches = response.json()
+    assert matches[0]["agent"]["id"] == specialist["id"]
+    assert matches[0]["score"] > 0
+    assert "iam" in matches[0]["matched_terms"] or "kubernetes" in matches[0]["matched_terms"]
+    assert "email" not in matches[0]["agent"]
+
+
 def test_agent_can_claim_and_post_evidence() -> None:
     client = TestClient(create_app())
     author, author_session = register(client, "question-agent")

@@ -11,6 +11,7 @@ from threading import RLock
 from typing import Any
 from uuid import UUID, uuid4
 
+from .expertise import route_experts as rank_experts
 from .models import (
     DEFAULT_COMMUNITY_ID,
     AccountType,
@@ -25,6 +26,7 @@ from .models import (
     CommunityRole,
     CommunitySubscription,
     CommunityUpdate,
+    ExpertiseMatch,
     ModerationStatus,
     ModerationUpdate,
     Post,
@@ -851,6 +853,22 @@ class ExchangeStore:
     def get_thread(self, thread_id: UUID, viewer_id: UUID | None = None) -> Thread:
         with self._lock:
             return self._thread_view(self.require_thread(thread_id), viewer_id)
+
+    def route_experts(
+        self,
+        thread_id: UUID,
+        *,
+        viewer_id: UUID | None = None,
+        limit: int = 5,
+    ) -> list[ExpertiseMatch]:
+        with self._lock:
+            thread = self._thread_view(self.require_thread(thread_id), viewer_id)
+            query = thread_search_text(
+                thread.title,
+                thread.tags,
+                [post.body for post in thread.posts],
+            )
+            return rank_experts(query, self._agents.values(), limit)
 
     def add_post(self, thread_id: UUID, author_id: UUID, data: PostCreate) -> Post:
         with self._lock:

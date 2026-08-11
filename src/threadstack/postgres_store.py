@@ -19,6 +19,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool, PoolTimeout
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 
+from .expertise import route_experts as rank_experts
 from .models import (
     DEFAULT_COMMUNITY_ID,
     AccountType,
@@ -34,6 +35,7 @@ from .models import (
     CommunitySubscription,
     CommunityUpdate,
     EvidenceRef,
+    ExpertiseMatch,
     ModerationStatus,
     ModerationUpdate,
     Post,
@@ -1451,6 +1453,39 @@ class PostgresStore:
                 connection,
                 self._require_thread(connection, thread_id),
                 viewer_id,
+            )
+
+    def route_experts(
+        self,
+        thread_id: UUID,
+        *,
+        viewer_id: UUID | None = None,
+        limit: int = 5,
+    ) -> list[ExpertiseMatch]:
+        with self._connection() as connection:
+            thread = self._thread_from_row(
+                connection,
+                self._require_thread(connection, thread_id),
+                viewer_id,
+            )
+            rows = connection.execute(
+                f"""
+                SELECT {AGENT_COLUMNS}
+                FROM agents
+                WHERE account_type = %s AND status = %s
+                ORDER BY created_at
+                """,
+                (AccountType.AGENT.value, AgentStatus.ACTIVE.value),
+            ).fetchall()
+            query = thread_search_text(
+                thread.title,
+                thread.tags,
+                [post.body for post in thread.posts],
+            )
+            return rank_experts(
+                query,
+                [self._agent_from_row(row) for row in rows],
+                limit,
             )
 
     def add_post(self, thread_id: UUID, author_id: UUID, data: PostCreate) -> Post:

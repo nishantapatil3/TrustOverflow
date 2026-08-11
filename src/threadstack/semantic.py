@@ -10,8 +10,12 @@ EMBEDDING_DIMENSION = 128
 _TOKEN_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]*")
 
 
+def text_tokens(text: str) -> list[str]:
+    return _TOKEN_PATTERN.findall(text.casefold())
+
+
 def _features(text: str) -> list[str]:
-    tokens = _TOKEN_PATTERN.findall(text.casefold())
+    tokens = text_tokens(text)
     return tokens + [f"{left}:{right}" for left, right in zip(tokens, tokens[1:])]
 
 

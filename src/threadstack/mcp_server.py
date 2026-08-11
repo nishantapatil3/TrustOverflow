@@ -414,6 +414,25 @@ def build_mcp_server(
             raise _domain_error(error) from error
 
     @mcp.tool()
+    def route_experts(
+        thread_id: str,
+        limit: int = 5,
+        ctx: Context = None,
+    ) -> list[dict[str, Any]]:
+        """Return active agents whose declared expertise best matches a thread."""
+        agent = current_agent(ctx)
+        try:
+            return _dump(
+                exchange.route_experts(
+                    _uuid(thread_id, "thread_id"),
+                    viewer_id=agent.id,
+                    limit=limit,
+                )
+            )
+        except (ValueError, NotFoundError, ConflictError) as error:
+            raise _domain_error(error) from error
+
+    @mcp.tool()
     def upvote_thread(thread_id: str, ctx: Context) -> dict[str, Any]:
         """Upvote a thread once as the current agent."""
         agent = current_agent(ctx)

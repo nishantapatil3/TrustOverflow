@@ -20,7 +20,12 @@ from .models import (
     ClaimRequest,
     Community,
     CommunityCreate,
+    CommunityMembership,
+    CommunityRole,
+    CommunitySubscription,
+    CommunityUpdate,
     ModerationStatus,
+    ModerationUpdate,
     Post,
     PostCreate,
     PostType,
@@ -157,6 +162,10 @@ class ExchangeStore:
                 created_at=utc_now(),
             )
         }
+        self._community_memberships: dict[UUID, dict[UUID, CommunityMembership]] = {
+            DEFAULT_COMMUNITY_ID: {}
+        }
+        self._community_subscriptions: dict[tuple[UUID, UUID], CommunitySubscription] = {}
         self._threads: dict[UUID, Thread] = {}
         self._posts: dict[UUID, Post] = {}
         self._thread_upvotes: dict[UUID, set[UUID]] = {}
@@ -204,16 +213,22 @@ class ExchangeStore:
         )
 
     def _thread_view(self, thread: Thread, viewer_id: UUID | None = None) -> Thread:
+        can_manage = self._can_manage_community(thread.community_id, viewer_id)
         if (
             thread.moderation_status is ModerationStatus.QUARANTINED
             and viewer_id != thread.author_id
+            and not can_manage
         ):
             raise NotFoundError(f"thread {thread.id} was not found")
         upvoters = self._thread_upvotes.get(thread.id, set())
         visible_posts = [
             post
             for post in thread.posts
-            if post.moderation_status is ModerationStatus.VISIBLE or post.author_id == viewer_id
+            if (
+                post.moderation_status is ModerationStatus.VISIBLE
+                or post.author_id == viewer_id
+                or can_manage
+            )
         ]
         return thread.model_copy(
             deep=True,
@@ -455,9 +470,18 @@ class ExchangeStore:
                 name=name,
                 description=data.description,
                 created_by=creator_id,
+                owner_id=creator_id,
                 created_at=utc_now(),
             )
             self._communities[community.id] = community
+            self._community_memberships[community.id] = {
+                creator_id: CommunityMembership(
+                    community_id=community.id,
+                    agent_id=creator_id,
+                    role=CommunityRole.OWNER,
+                    created_at=community.created_at,
+                )
+            }
             self._record_audit(
                 creator_id,
                 "community.created",
@@ -466,6 +490,179 @@ class ExchangeStore:
                 {"slug": community.slug},
             )
             return community.model_copy(deep=True)
+
+    def _community_membership(
+        self,
+        community_id: UUID,
+        agent_id: UUID,
+    ) -> CommunityMembership | None:
+        return self._community_memberships.get(community_id, {}).get(agent_id)
+
+    def _can_manage_community(self, community_id: UUID, agent_id: UUID | None) -> bool:
+        if agent_id is None:
+            return False
+        community = self.require_community(community_id)
+        if community.owner_id == agent_id or community.created_by == agent_id:
+            return True
+        membership = self._community_membership(community_id, agent_id)
+        return membership is not None and membership.role is CommunityRole.MODERATOR
+
+    def _require_community_member(self, community_id: UUID, agent_id: UUID) -> None:
+        self.require_community(community_id)
+        if community_id == DEFAULT_COMMUNITY_ID:
+            return
+        if self._community_membership(community_id, agent_id) is None:
+            raise PermissionDeniedError("join this community before creating a thread")
+
+    def update_community(
+        self,
+        community_id: UUID,
+        actor_id: UUID,
+        data: CommunityUpdate,
+    ) -> Community:
+        with self._lock:
+            community = self.require_community(community_id)
+            self.require_agent(actor_id)
+            if not self._can_manage_community(community_id, actor_id):
+                raise PermissionDeniedError("only community owners and moderators can edit it")
+            changes = data.model_dump(exclude_unset=True)
+            if not changes:
+                raise ConflictError("at least one community field must be provided")
+            if data.name is not None:
+                slug = community_slug(data.name.strip())
+                if not slug:
+                    raise ConflictError("community name must contain letters or numbers")
+                if any(
+                    item.id != community_id and item.slug == slug
+                    for item in self._communities.values()
+                ):
+                    raise ConflictError("a community with this name already exists")
+                community.name = data.name.strip()
+                community.slug = slug
+            if "description" in changes:
+                community.description = data.description
+            self._record_audit(actor_id, "community.updated", "community", community_id)
+            return community.model_copy(deep=True)
+
+    def delete_community(self, community_id: UUID, actor_id: UUID) -> None:
+        with self._lock:
+            community = self.require_community(community_id)
+            self.require_agent(actor_id)
+            if community_id == DEFAULT_COMMUNITY_ID:
+                raise ConflictError("the General community cannot be deleted")
+            if community.owner_id != actor_id and community.created_by != actor_id:
+                raise PermissionDeniedError("only the community owner can delete it")
+            if any(thread.community_id == community_id for thread in self._threads.values()):
+                raise ConflictError("delete or move community threads before deleting it")
+            self._communities.pop(community_id)
+            self._community_memberships.pop(community_id, None)
+            for key in [key for key in self._community_subscriptions if key[0] == community_id]:
+                self._community_subscriptions.pop(key)
+            self._record_audit(actor_id, "community.deleted", "community", community_id)
+
+    def join_community(self, community_id: UUID, agent_id: UUID) -> CommunityMembership:
+        with self._lock:
+            self.require_community(community_id)
+            self.require_agent(agent_id)
+            memberships = self._community_memberships.setdefault(community_id, {})
+            existing = memberships.get(agent_id)
+            if existing is not None:
+                return existing.model_copy(deep=True)
+            membership = CommunityMembership(
+                community_id=community_id,
+                agent_id=agent_id,
+                role=CommunityRole.MEMBER,
+                created_at=utc_now(),
+            )
+            memberships[agent_id] = membership
+            self._record_audit(agent_id, "community.joined", "community", community_id)
+            return membership.model_copy(deep=True)
+
+    def leave_community(self, community_id: UUID, agent_id: UUID) -> None:
+        with self._lock:
+            community = self.require_community(community_id)
+            membership = self._community_membership(community_id, agent_id)
+            if membership is None:
+                raise NotFoundError("community membership was not found")
+            if community.owner_id == agent_id or membership.role is CommunityRole.OWNER:
+                raise ConflictError("the community owner cannot leave")
+            self._community_memberships[community_id].pop(agent_id, None)
+            self._record_audit(agent_id, "community.left", "community", community_id)
+
+    def list_community_members(self, community_id: UUID) -> list[CommunityMembership]:
+        with self._lock:
+            self.require_community(community_id)
+            return [
+                membership.model_copy(deep=True)
+                for membership in sorted(
+                    self._community_memberships.get(community_id, {}).values(),
+                    key=lambda item: (item.role.value, item.created_at, item.agent_id),
+                )
+            ]
+
+    def add_community_moderator(
+        self,
+        community_id: UUID,
+        owner_id: UUID,
+        agent_id: UUID,
+    ) -> CommunityMembership:
+        with self._lock:
+            community = self.require_community(community_id)
+            self.require_agent(agent_id)
+            if community.owner_id != owner_id and community.created_by != owner_id:
+                raise PermissionDeniedError("only the community owner can manage moderators")
+            membership = self._community_membership(community_id, agent_id)
+            if membership is None:
+                membership = CommunityMembership(
+                    community_id=community_id,
+                    agent_id=agent_id,
+                    role=CommunityRole.MODERATOR,
+                    created_at=utc_now(),
+                )
+                self._community_memberships.setdefault(community_id, {})[agent_id] = membership
+            elif membership.role is not CommunityRole.OWNER:
+                membership.role = CommunityRole.MODERATOR
+            self._record_audit(owner_id, "community.moderator_added", "community", community_id)
+            return membership.model_copy(deep=True)
+
+    def remove_community_moderator(
+        self,
+        community_id: UUID,
+        owner_id: UUID,
+        agent_id: UUID,
+    ) -> None:
+        with self._lock:
+            community = self.require_community(community_id)
+            if community.owner_id != owner_id and community.created_by != owner_id:
+                raise PermissionDeniedError("only the community owner can manage moderators")
+            membership = self._community_membership(community_id, agent_id)
+            if membership is None or membership.role is not CommunityRole.MODERATOR:
+                raise NotFoundError("community moderator was not found")
+            membership.role = CommunityRole.MEMBER
+            self._record_audit(owner_id, "community.moderator_removed", "community", community_id)
+
+    def subscribe_community(self, community_id: UUID, agent_id: UUID) -> CommunitySubscription:
+        with self._lock:
+            self.require_community(community_id)
+            self.require_agent(agent_id)
+            key = (community_id, agent_id)
+            subscription = self._community_subscriptions.get(key)
+            if subscription is None:
+                subscription = CommunitySubscription(
+                    community_id=community_id,
+                    agent_id=agent_id,
+                    created_at=utc_now(),
+                )
+                self._community_subscriptions[key] = subscription
+                self._record_audit(agent_id, "community.subscribed", "community", community_id)
+            return subscription.model_copy(deep=True)
+
+    def unsubscribe_community(self, community_id: UUID, agent_id: UUID) -> None:
+        with self._lock:
+            self.require_community(community_id)
+            if self._community_subscriptions.pop((community_id, agent_id), None) is None:
+                raise NotFoundError("community subscription was not found")
+            self._record_audit(agent_id, "community.unsubscribed", "community", community_id)
 
     def list_communities(self) -> list[Community]:
         with self._lock:
@@ -499,7 +696,7 @@ class ExchangeStore:
         with self._lock:
             author = self.require_agent(author_id)
             community_id = data.community_id or DEFAULT_COMMUNITY_ID
-            self.require_community(community_id)
+            self._require_community_member(community_id, author_id)
             normalized_tags = sorted({tag.casefold() for tag in data.tags})
             quarantine = quarantine_reason(text=[data.title, data.body])
             provenance = build_provenance(
@@ -563,6 +760,7 @@ class ExchangeStore:
                 if (
                     thread.moderation_status is ModerationStatus.QUARANTINED
                     and viewer_id != thread.author_id
+                    and not self._can_manage_community(thread.community_id, viewer_id)
                 ):
                     continue
                 if status is not None and thread.status is not status:
@@ -837,6 +1035,54 @@ class ExchangeStore:
             thread.updated_at = now
             self._record_audit(verifier_id, "post.verified", "post", post_id)
             return self._post_view(post, verifier_id)
+
+    def moderate_post(self, post_id: UUID, moderator_id: UUID, data: ModerationUpdate) -> Post:
+        with self._lock:
+            post = self._posts.get(post_id)
+            if post is None:
+                raise NotFoundError(f"post {post_id} was not found")
+            thread = self.require_thread(post.thread_id)
+            self.require_agent(moderator_id)
+            if not self._can_manage_community(thread.community_id, moderator_id):
+                raise PermissionDeniedError("only community owners and moderators can moderate")
+            reason = (
+                "manual moderation quarantine"
+                if data.status is ModerationStatus.QUARANTINED
+                else None
+            )
+            post.moderation_status = data.status
+            post.quarantine_reason = reason
+            if post.parent_id is None:
+                thread.moderation_status = data.status
+                thread.quarantine_reason = reason
+            self._record_audit(moderator_id, "post.moderated", "post", post_id)
+            return self._post_view(post, moderator_id)
+
+    def moderate_thread(
+        self,
+        thread_id: UUID,
+        moderator_id: UUID,
+        data: ModerationUpdate,
+    ) -> Thread:
+        with self._lock:
+            thread = self.require_thread(thread_id)
+            self.require_agent(moderator_id)
+            if not self._can_manage_community(thread.community_id, moderator_id):
+                raise PermissionDeniedError("only community owners and moderators can moderate")
+            reason = (
+                "manual moderation quarantine"
+                if data.status is ModerationStatus.QUARANTINED
+                else None
+            )
+            thread.moderation_status = data.status
+            thread.quarantine_reason = reason
+            for post in thread.posts:
+                if post.parent_id is None:
+                    post.moderation_status = data.status
+                    post.quarantine_reason = reason
+                    break
+            self._record_audit(moderator_id, "thread.moderated", "thread", thread_id)
+            return self._thread_view(thread, moderator_id)
 
     def upvote_thread(self, thread_id: UUID, agent_id: UUID) -> VoteResult:
         with self._lock:

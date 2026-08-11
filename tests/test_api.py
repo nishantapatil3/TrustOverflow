@@ -88,6 +88,95 @@ def test_threads_default_to_general_and_agents_can_create_communities() -> None:
     assert [item["id"] for item in response.json()] == [scoped_thread["id"]]
 
 
+def test_community_membership_roles_subscriptions_and_moderation() -> None:
+    client = TestClient(create_app())
+    owner, owner_session = register(client, "community-owner")
+    member, member_session = register(client, "community-member")
+    community = client.post(
+        "/communities",
+        headers=auth_headers(owner_session),
+        json={"name": "Access Controlled Research"},
+    ).json()
+    assert community["owner_id"] == owner["id"]
+
+    blocked = client.post(
+        "/threads",
+        headers=auth_headers(member_session),
+        json={
+            "title": "Blocked community post",
+            "body": "Membership is required.",
+            "community_id": community["id"],
+        },
+    )
+    assert blocked.status_code == 403
+
+    joined = client.post(
+        f"/communities/{community['id']}/members",
+        headers=auth_headers(member_session),
+    )
+    assert joined.status_code == 201
+    assert joined.json()["role"] == "member"
+    assert client.put(
+        f"/communities/{community['id']}/subscription",
+        headers=auth_headers(member_session),
+    ).status_code == 200
+
+    allowed = client.post(
+        "/threads",
+        headers=auth_headers(member_session),
+        json={
+            "title": "Allowed community post",
+            "body": "Membership grants posting access.",
+            "community_id": community["id"],
+        },
+    )
+    assert allowed.status_code == 201
+    members = client.get(f"/communities/{community['id']}/members").json()
+    assert {item["agent_id"] for item in members} == {owner["id"], member["id"]}
+
+    promoted = client.post(
+        f"/communities/{community['id']}/moderators/{member['id']}",
+        headers=auth_headers(owner_session),
+    )
+    assert promoted.status_code == 200
+    assert promoted.json()["role"] == "moderator"
+
+    quarantined = client.post(
+        "/threads",
+        headers=auth_headers(member_session),
+        json={
+            "title": "Needs review",
+            "body": "-----BEGIN PRIVATE KEY-----",
+            "community_id": community["id"],
+        },
+    ).json()
+    assert quarantined["moderation_status"] == "quarantined"
+    released = client.patch(
+        f"/threads/{quarantined['id']}/moderation",
+        headers=auth_headers(member_session),
+        json={"status": "visible"},
+    )
+    assert released.status_code == 200
+    assert released.json()["moderation_status"] == "visible"
+
+    assert client.delete(
+        f"/communities/{community['id']}/moderators/{member['id']}",
+        headers=auth_headers(owner_session),
+    ).status_code == 204
+    assert client.delete(
+        f"/communities/{community['id']}/members/me",
+        headers=auth_headers(member_session),
+    ).status_code == 204
+    assert client.delete(
+        f"/communities/{community['id']}/subscription",
+        headers=auth_headers(member_session),
+    ).status_code == 204
+    assert client.delete(
+        f"/communities/{community['id']}/members/me",
+        headers=auth_headers(owner_session),
+    ).status_code == 409
+
+
 def test_agent_can_create_and_search_a_thread() -> None:
     client = TestClient(create_app())
     author, session = register(client, "forensics-agent", ["incident-response"])

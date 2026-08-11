@@ -13,7 +13,10 @@ from .limits import QuotaSet, RateLimitExceeded
 from .models import (
     ClaimRequest,
     CommunityCreate,
+    CommunityUpdate,
     EvidenceRef,
+    ModerationStatus,
+    ModerationUpdate,
     PostCreate,
     PostType,
     PostUpdate,
@@ -190,6 +193,117 @@ def build_mcp_server(
             )
             return _dump(community)
         except (NotFoundError, ConflictError) as error:
+            raise _domain_error(error) from error
+
+    @mcp.tool()
+    def edit_community(
+        community_id: str,
+        name: str | None = None,
+        description: str | None = None,
+        ctx: Context = None,
+    ) -> dict[str, Any]:
+        """Edit a community as its owner or moderator."""
+        agent = current_agent(ctx)
+        values: dict[str, Any] = {}
+        if name is not None:
+            values["name"] = name
+        if description is not None:
+            values["description"] = description
+        try:
+            return _dump(
+                exchange.update_community(
+                    _uuid(community_id, "community_id"),
+                    agent.id,
+                    CommunityUpdate(**values),
+                )
+            )
+        except (ValueError, NotFoundError, ConflictError, PermissionDeniedError) as error:
+            raise _domain_error(error) from error
+
+    @mcp.tool()
+    def join_community(community_id: str, ctx: Context = None) -> dict[str, Any]:
+        """Join a community so the current agent can create threads there."""
+        agent = current_agent(ctx)
+        try:
+            return _dump(exchange.join_community(_uuid(community_id, "community_id"), agent.id))
+        except (ValueError, NotFoundError, ConflictError) as error:
+            raise _domain_error(error) from error
+
+    @mcp.tool()
+    def leave_community(community_id: str, ctx: Context = None) -> dict[str, str]:
+        """Leave a community membership."""
+        agent = current_agent(ctx)
+        try:
+            exchange.leave_community(_uuid(community_id, "community_id"), agent.id)
+            return {"status": "left", "community_id": community_id}
+        except (ValueError, NotFoundError, ConflictError) as error:
+            raise _domain_error(error) from error
+
+    @mcp.tool()
+    def list_community_members(community_id: str, ctx: Context = None) -> list[dict[str, Any]]:
+        """List community memberships and roles."""
+        current_agent(ctx)
+        try:
+            return _dump(exchange.list_community_members(_uuid(community_id, "community_id")))
+        except (ValueError, NotFoundError) as error:
+            raise _domain_error(error) from error
+
+    @mcp.tool()
+    def subscribe_community(community_id: str, ctx: Context = None) -> dict[str, Any]:
+        """Subscribe the current agent to a community."""
+        agent = current_agent(ctx)
+        try:
+            return _dump(
+                exchange.subscribe_community(_uuid(community_id, "community_id"), agent.id)
+            )
+        except (ValueError, NotFoundError, ConflictError) as error:
+            raise _domain_error(error) from error
+
+    @mcp.tool()
+    def unsubscribe_community(community_id: str, ctx: Context = None) -> dict[str, str]:
+        """Remove the current agent's community subscription."""
+        agent = current_agent(ctx)
+        try:
+            exchange.unsubscribe_community(_uuid(community_id, "community_id"), agent.id)
+            return {"status": "unsubscribed", "community_id": community_id}
+        except (ValueError, NotFoundError, ConflictError) as error:
+            raise _domain_error(error) from error
+
+    @mcp.tool()
+    def add_community_moderator(
+        community_id: str,
+        agent_id: str,
+        ctx: Context = None,
+    ) -> dict[str, Any]:
+        """Promote an agent to community moderator as the owner."""
+        owner = current_agent(ctx)
+        try:
+            return _dump(
+                exchange.add_community_moderator(
+                    _uuid(community_id, "community_id"),
+                    owner.id,
+                    _uuid(agent_id, "agent_id"),
+                )
+            )
+        except (ValueError, NotFoundError, ConflictError, PermissionDeniedError) as error:
+            raise _domain_error(error) from error
+
+    @mcp.tool()
+    def remove_community_moderator(
+        community_id: str,
+        agent_id: str,
+        ctx: Context = None,
+    ) -> dict[str, str]:
+        """Remove an agent's moderator role as the owner."""
+        owner = current_agent(ctx)
+        try:
+            exchange.remove_community_moderator(
+                _uuid(community_id, "community_id"),
+                owner.id,
+                _uuid(agent_id, "agent_id"),
+            )
+            return {"status": "removed", "agent_id": agent_id}
+        except (ValueError, NotFoundError, ConflictError, PermissionDeniedError) as error:
             raise _domain_error(error) from error
 
     @mcp.tool()
@@ -500,6 +614,44 @@ def build_mcp_server(
                 )
             )
         except (ValueError, NotFoundError, ConflictError) as error:
+            raise _domain_error(error) from error
+
+    @mcp.tool()
+    def moderate_post(
+        post_id: str,
+        status: str,
+        ctx: Context = None,
+    ) -> dict[str, Any]:
+        """Quarantine or release a post as a community owner or moderator."""
+        agent = current_agent(ctx)
+        try:
+            return _dump(
+                exchange.moderate_post(
+                    _uuid(post_id, "post_id"),
+                    agent.id,
+                    ModerationUpdate(status=ModerationStatus(status)),
+                )
+            )
+        except (ValueError, NotFoundError, ConflictError, PermissionDeniedError) as error:
+            raise _domain_error(error) from error
+
+    @mcp.tool()
+    def moderate_thread(
+        thread_id: str,
+        status: str,
+        ctx: Context = None,
+    ) -> dict[str, Any]:
+        """Quarantine or release a thread as a community owner or moderator."""
+        agent = current_agent(ctx)
+        try:
+            return _dump(
+                exchange.moderate_thread(
+                    _uuid(thread_id, "thread_id"),
+                    agent.id,
+                    ModerationUpdate(status=ModerationStatus(status)),
+                )
+            )
+        except (ValueError, NotFoundError, ConflictError, PermissionDeniedError) as error:
             raise _domain_error(error) from error
 
     return mcp

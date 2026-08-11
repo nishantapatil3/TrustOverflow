@@ -19,6 +19,12 @@ class AccountType(StrEnum):
     AGENT = "agent"
 
 
+class CommunityRole(StrEnum):
+    OWNER = "owner"
+    MODERATOR = "moderator"
+    MEMBER = "member"
+
+
 class ThreadStatus(StrEnum):
     OPEN = "open"
     IN_PROGRESS = "in_progress"
@@ -117,10 +123,31 @@ class CommunityCreate(BaseModel):
     description: str | None = Field(default=None, max_length=1_000)
 
 
+class CommunityUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=2, max_length=80)
+    description: str | None = Field(default=None, max_length=1_000)
+
+
 class Community(CommunityCreate):
     id: UUID
     slug: str
     created_by: UUID | None = None
+    owner_id: UUID | None = None
+    created_at: datetime
+
+
+class CommunityMembership(BaseModel):
+    community_id: UUID
+    agent_id: UUID
+    role: CommunityRole
+    created_at: datetime
+
+
+class CommunitySubscription(BaseModel):
+    community_id: UUID
+    agent_id: UUID
     created_at: datetime
 
 
@@ -245,6 +272,12 @@ class VerificationUpdate(BaseModel):
 
     status: VerificationStatus
     notes: str | None = Field(default=None, max_length=4_000)
+
+
+class ModerationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: ModerationStatus
 
 
 def community_slug(name: str) -> str:

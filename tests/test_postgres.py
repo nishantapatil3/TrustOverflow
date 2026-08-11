@@ -11,13 +11,16 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from threadstack.models import (
     DEFAULT_COMMUNITY_ID,
     AgentCreate,
+    CommunityCreate,
+    ModerationStatus,
+    ModerationUpdate,
     PostCreate,
     PostType,
     ThreadCreate,
 )
 from threadstack.postgres_store import PostgresStore
 from threadstack.provenance import canonical_bytes, post_payload, thread_payload
-from threadstack.store import AuthenticationError, NotFoundError
+from threadstack.store import AuthenticationError, NotFoundError, PermissionDeniedError
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 pytestmark = pytest.mark.postgres
@@ -207,3 +210,66 @@ def test_postgres_hides_quarantined_threads_from_other_agents(
     with pytest.raises(NotFoundError):
         postgres_store.get_thread(thread.id, viewer.id)
     assert postgres_store.get_thread(thread.id, author.id).id == thread.id
+
+
+def test_postgres_persists_community_memberships_and_moderation(
+    postgres_store: PostgresStore,
+) -> None:
+    suffix = uuid4().hex[:10]
+    user, _ = postgres_store.login_or_create_user(
+        f"community-integration-{suffix}@example.com",
+        "correct-horse-battery-staple",
+    )
+    owner, _ = postgres_store.register_agent(
+        user.id,
+        AgentCreate(name=f"community-owner-{suffix}"),
+    )
+    member, _ = postgres_store.register_agent(
+        user.id,
+        AgentCreate(name=f"community-member-{suffix}"),
+    )
+    community = postgres_store.create_community(
+        owner.id,
+        CommunityCreate(name=f"Controlled Community {suffix}"),
+    )
+    with pytest.raises(PermissionDeniedError):
+        postgres_store.create_thread(
+            member.id,
+            ThreadCreate(
+                title="Blocked member thread",
+                body="Membership is required.",
+                community_id=community.id,
+            ),
+        )
+    postgres_store.join_community(community.id, member.id)
+    postgres_store.subscribe_community(community.id, member.id)
+    thread = postgres_store.create_thread(
+        member.id,
+        ThreadCreate(
+            title="Allowed member thread",
+            body="Membership grants access.",
+            community_id=community.id,
+        ),
+    )
+    moderator = postgres_store.add_community_moderator(community.id, owner.id, member.id)
+    assert moderator.role.value == "moderator"
+    quarantined = postgres_store.create_thread(
+        member.id,
+        ThreadCreate(
+            title="Review this thread",
+            body="-----BEGIN PRIVATE KEY-----",
+            community_id=community.id,
+        ),
+    )
+    assert quarantined.moderation_status is ModerationStatus.QUARANTINED
+    released = postgres_store.moderate_thread(
+        quarantined.id,
+        member.id,
+        ModerationUpdate(status=ModerationStatus.VISIBLE),
+    )
+    assert released.moderation_status is ModerationStatus.VISIBLE
+    assert any(
+        item.agent_id == member.id
+        for item in postgres_store.list_community_members(community.id)
+    )
+    assert postgres_store.get_thread(thread.id, member.id).id == thread.id

@@ -28,8 +28,13 @@ from .models import (
     ClaimRequest,
     Community,
     CommunityCreate,
+    CommunityMembership,
+    CommunityRole,
+    CommunitySubscription,
+    CommunityUpdate,
     EvidenceRef,
     ModerationStatus,
+    ModerationUpdate,
     Post,
     PostCreate,
     PostType,
@@ -233,6 +238,7 @@ class PostgresStore:
             name=row["name"],
             description=row["description"],
             created_by=row["created_by"],
+            owner_id=row.get("owner_id", row["created_by"]),
             created_at=row["created_at"],
         )
 
@@ -292,13 +298,24 @@ class PostgresStore:
         row: dict[str, Any],
         viewer_id: UUID | None = None,
     ) -> Thread:
+        can_manage = self._can_manage_community(connection, row["community_id"], viewer_id)
         if (
             row.get("moderation_status") == ModerationStatus.QUARANTINED.value
             and row["author_id"] != viewer_id
+            and not can_manage
         ):
             raise NotFoundError(f"thread {row['id']} was not found")
+        post_visibility = "TRUE"
+        post_parameters: tuple[Any, ...] = (row["id"],)
+        if not can_manage:
+            post_visibility = "(moderation_status = %s OR author_id = %s)"
+            post_parameters = (
+                row["id"],
+                ModerationStatus.VISIBLE.value,
+                viewer_id,
+            )
         post_rows = connection.execute(
-            """
+            f"""
             SELECT
                 id,
                 thread_id,
@@ -321,10 +338,10 @@ class PostgresStore:
                 (SELECT COUNT(*)::int FROM upvotes WHERE upvotes.post_id = posts.id) AS score
             FROM posts
             WHERE thread_id = %s
-              AND (moderation_status = %s OR author_id = %s)
+              AND {post_visibility}
             ORDER BY created_at, id
             """,
-            (row["id"], ModerationStatus.VISIBLE.value, viewer_id),
+            post_parameters,
         ).fetchall()
         provenance = (
             Provenance(
@@ -415,6 +432,47 @@ class PostgresStore:
         if row is None:
             raise NotFoundError(f"community {community_id} was not found")
         return self._community_from_row(row)
+
+    @staticmethod
+    def _community_membership(
+        connection: psycopg.Connection[Any],
+        community_id: UUID,
+        agent_id: UUID,
+    ) -> dict[str, Any] | None:
+        return connection.execute(
+            """
+            SELECT community_id, agent_id, role, created_at
+            FROM community_memberships
+            WHERE community_id = %s AND agent_id = %s
+            """,
+            (community_id, agent_id),
+        ).fetchone()
+
+    def _can_manage_community(
+        self,
+        connection: psycopg.Connection[Any],
+        community_id: UUID,
+        agent_id: UUID | None,
+    ) -> bool:
+        if agent_id is None:
+            return False
+        community = self._require_community(connection, community_id)
+        if community.owner_id == agent_id or community.created_by == agent_id:
+            return True
+        membership = self._community_membership(connection, community_id, agent_id)
+        return membership is not None and membership["role"] == CommunityRole.MODERATOR.value
+
+    def _require_community_member(
+        self,
+        connection: psycopg.Connection[Any],
+        community_id: UUID,
+        agent_id: UUID,
+    ) -> None:
+        self._require_community(connection, community_id)
+        if community_id == DEFAULT_COMMUNITY_ID:
+            return
+        if self._community_membership(connection, community_id, agent_id) is None:
+            raise PermissionDeniedError("join this community before creating a thread")
 
     def register_agent(self, owner_id: UUID, data: AgentCreate) -> tuple[Agent, str]:
         validate_public_key(data.public_key)
@@ -801,13 +859,14 @@ class PostgresStore:
                     name=name,
                     description=data.description,
                     created_by=creator_id,
+                    owner_id=creator_id,
                     created_at=utc_now(),
                 )
                 connection.execute(
                     """
                     INSERT INTO communities (
-                        id, slug, name, description, created_by, created_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                        id, slug, name, description, created_by, owner_id, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         community.id,
@@ -815,6 +874,19 @@ class PostgresStore:
                         community.name,
                         community.description,
                         community.created_by,
+                        community.owner_id,
+                        community.created_at,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO community_memberships (community_id, agent_id, role, created_at)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (
+                        community.id,
+                        creator_id,
+                        CommunityRole.OWNER.value,
                         community.created_at,
                     ),
                 )
@@ -845,6 +917,234 @@ class PostgresStore:
         with self._connection() as connection:
             return self._require_community(connection, community_id)
 
+    def update_community(
+        self,
+        community_id: UUID,
+        actor_id: UUID,
+        data: CommunityUpdate,
+    ) -> Community:
+        with self._connection() as connection:
+            self._require_community(connection, community_id)
+            self._require_agent(connection, actor_id)
+            if not self._can_manage_community(connection, community_id, actor_id):
+                raise PermissionDeniedError("only community owners and moderators can edit it")
+            changes = data.model_dump(exclude_unset=True)
+            if not changes:
+                raise ConflictError("at least one community field must be provided")
+            assignments: list[str] = []
+            parameters: list[Any] = []
+            if "name" in changes:
+                name = changes["name"].strip()
+                slug = community_slug(name)
+                if not slug:
+                    raise ConflictError("community name must contain letters or numbers")
+                duplicate = connection.execute(
+                    "SELECT 1 FROM communities WHERE LOWER(slug) = LOWER(%s) AND id <> %s",
+                    (slug, community_id),
+                ).fetchone()
+                if duplicate is not None:
+                    raise ConflictError("a community with this name already exists")
+                assignments.extend(["name = %s", "slug = %s"])
+                parameters.extend([name, slug])
+            if "description" in changes:
+                assignments.append("description = %s")
+                parameters.append(changes["description"])
+            parameters.append(community_id)
+            connection.execute(
+                f"UPDATE communities SET {', '.join(assignments)} WHERE id = %s",
+                parameters,
+            )
+            self._record_audit(connection, actor_id, "community.updated", "community", community_id)
+            row = connection.execute(
+                "SELECT * FROM communities WHERE id = %s",
+                (community_id,),
+            ).fetchone()
+            assert row is not None
+            return self._community_from_row(row)
+
+    def delete_community(self, community_id: UUID, actor_id: UUID) -> None:
+        with self._connection() as connection:
+            community = self._require_community(connection, community_id)
+            self._require_agent(connection, actor_id)
+            if community_id == DEFAULT_COMMUNITY_ID:
+                raise ConflictError("the General community cannot be deleted")
+            if community.owner_id != actor_id and community.created_by != actor_id:
+                raise PermissionDeniedError("only the community owner can delete it")
+            if connection.execute(
+                "SELECT 1 FROM threads WHERE community_id = %s LIMIT 1",
+                (community_id,),
+            ).fetchone():
+                raise ConflictError("delete or move community threads before deleting it")
+            connection.execute(
+                "DELETE FROM community_subscriptions WHERE community_id = %s",
+                (community_id,),
+            )
+            connection.execute(
+                "DELETE FROM community_memberships WHERE community_id = %s",
+                (community_id,),
+            )
+            connection.execute("DELETE FROM communities WHERE id = %s", (community_id,))
+            self._record_audit(connection, actor_id, "community.deleted", "community", community_id)
+
+    def join_community(self, community_id: UUID, agent_id: UUID) -> CommunityMembership:
+        with self._connection() as connection:
+            self._require_community(connection, community_id)
+            self._require_agent(connection, agent_id)
+            connection.execute(
+                """
+                INSERT INTO community_memberships (community_id, agent_id, role, created_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (community_id, agent_id) DO NOTHING
+                """,
+                (community_id, agent_id, CommunityRole.MEMBER.value, utc_now()),
+            )
+            row = self._community_membership(connection, community_id, agent_id)
+            assert row is not None
+            self._record_audit(connection, agent_id, "community.joined", "community", community_id)
+            return CommunityMembership(**row)
+
+    def leave_community(self, community_id: UUID, agent_id: UUID) -> None:
+        with self._connection() as connection:
+            community = self._require_community(connection, community_id)
+            membership = self._community_membership(connection, community_id, agent_id)
+            if membership is None:
+                raise NotFoundError("community membership was not found")
+            if community.owner_id == agent_id or membership["role"] == CommunityRole.OWNER.value:
+                raise ConflictError("the community owner cannot leave")
+            connection.execute(
+                "DELETE FROM community_memberships WHERE community_id = %s AND agent_id = %s",
+                (community_id, agent_id),
+            )
+            self._record_audit(connection, agent_id, "community.left", "community", community_id)
+
+    def list_community_members(self, community_id: UUID) -> list[CommunityMembership]:
+        with self._connection() as connection:
+            self._require_community(connection, community_id)
+            rows = connection.execute(
+                """
+                SELECT community_id, agent_id, role, created_at
+                FROM community_memberships
+                WHERE community_id = %s
+                ORDER BY role, created_at, agent_id
+                """,
+                (community_id,),
+            ).fetchall()
+            return [CommunityMembership(**row) for row in rows]
+
+    def add_community_moderator(
+        self,
+        community_id: UUID,
+        owner_id: UUID,
+        agent_id: UUID,
+    ) -> CommunityMembership:
+        with self._connection() as connection:
+            community = self._require_community(connection, community_id)
+            self._require_agent(connection, agent_id)
+            if community.owner_id != owner_id and community.created_by != owner_id:
+                raise PermissionDeniedError("only the community owner can manage moderators")
+            existing = self._community_membership(connection, community_id, agent_id)
+            if existing is not None and existing["role"] == CommunityRole.OWNER.value:
+                return CommunityMembership(**existing)
+            connection.execute(
+                """
+                INSERT INTO community_memberships (community_id, agent_id, role, created_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (community_id, agent_id)
+                DO UPDATE SET role = EXCLUDED.role
+                """,
+                (community_id, agent_id, CommunityRole.MODERATOR.value, utc_now()),
+            )
+            row = self._community_membership(connection, community_id, agent_id)
+            assert row is not None
+            self._record_audit(
+                connection,
+                owner_id,
+                "community.moderator_added",
+                "community",
+                community_id,
+            )
+            return CommunityMembership(**row)
+
+    def remove_community_moderator(
+        self,
+        community_id: UUID,
+        owner_id: UUID,
+        agent_id: UUID,
+    ) -> None:
+        with self._connection() as connection:
+            community = self._require_community(connection, community_id)
+            if community.owner_id != owner_id and community.created_by != owner_id:
+                raise PermissionDeniedError("only the community owner can manage moderators")
+            membership = self._community_membership(connection, community_id, agent_id)
+            if membership is None or membership["role"] != CommunityRole.MODERATOR.value:
+                raise NotFoundError("community moderator was not found")
+            connection.execute(
+                """
+                UPDATE community_memberships SET role = %s
+                WHERE community_id = %s AND agent_id = %s
+                """,
+                (CommunityRole.MEMBER.value, community_id, agent_id),
+            )
+            self._record_audit(
+                connection,
+                owner_id,
+                "community.moderator_removed",
+                "community",
+                community_id,
+            )
+
+    def subscribe_community(self, community_id: UUID, agent_id: UUID) -> CommunitySubscription:
+        with self._connection() as connection:
+            self._require_community(connection, community_id)
+            self._require_agent(connection, agent_id)
+            created_at = utc_now()
+            connection.execute(
+                """
+                INSERT INTO community_subscriptions (community_id, agent_id, created_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (community_id, agent_id) DO NOTHING
+                """,
+                (community_id, agent_id, created_at),
+            )
+            row = connection.execute(
+                """
+                SELECT community_id, agent_id, created_at
+                FROM community_subscriptions
+                WHERE community_id = %s AND agent_id = %s
+                """,
+                (community_id, agent_id),
+            ).fetchone()
+            assert row is not None
+            self._record_audit(
+                connection,
+                agent_id,
+                "community.subscribed",
+                "community",
+                community_id,
+            )
+            return CommunitySubscription(**row)
+
+    def unsubscribe_community(self, community_id: UUID, agent_id: UUID) -> None:
+        with self._connection() as connection:
+            self._require_community(connection, community_id)
+            deleted = connection.execute(
+                """
+                DELETE FROM community_subscriptions
+                WHERE community_id = %s AND agent_id = %s
+                RETURNING community_id
+                """,
+                (community_id, agent_id),
+            ).fetchone()
+            if deleted is None:
+                raise NotFoundError("community subscription was not found")
+            self._record_audit(
+                connection,
+                agent_id,
+                "community.unsubscribed",
+                "community",
+                community_id,
+            )
+
     def create_thread(self, author_id: UUID, data: ThreadCreate) -> Thread:
         tags = sorted({tag.casefold() for tag in data.tags})
         community_id = data.community_id or DEFAULT_COMMUNITY_ID
@@ -853,7 +1153,7 @@ class PostgresStore:
         post_id = uuid4()
         with self._connection() as connection:
             author = self._require_agent(connection, author_id)
-            self._require_community(connection, community_id)
+            self._require_community_member(connection, community_id, author_id)
             quarantine = quarantine_reason(text=[data.title, data.body])
             provenance = build_provenance(
                 signer_id=author_id,
@@ -933,10 +1233,36 @@ class PostgresStore:
         community_id: UUID | None = None,
         viewer_id: UUID | None = None,
     ) -> list[Thread]:
-        conditions = [
-            "(moderation_status = %s OR author_id = %s)"
-        ]
-        parameters: list[Any] = [ModerationStatus.VISIBLE.value, viewer_id]
+        if viewer_id is None:
+            conditions = ["moderation_status = %s"]
+            parameters: list[Any] = [ModerationStatus.VISIBLE.value]
+        else:
+            conditions = [
+                """
+                (
+                    moderation_status = %s
+                    OR author_id = %s
+                    OR EXISTS (
+                        SELECT 1 FROM communities AS viewer_community
+                        WHERE viewer_community.id = threads.community_id
+                          AND viewer_community.owner_id = %s
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM community_memberships AS viewer_membership
+                        WHERE viewer_membership.community_id = threads.community_id
+                          AND viewer_membership.agent_id = %s
+                          AND viewer_membership.role = %s
+                    )
+                )
+                """
+            ]
+            parameters = [
+                ModerationStatus.VISIBLE.value,
+                viewer_id,
+                viewer_id,
+                viewer_id,
+                CommunityRole.MODERATOR.value,
+            ]
         if community_id is not None:
             conditions.append("community_id = %s")
             parameters.append(community_id)
@@ -1366,6 +1692,81 @@ class PostgresStore:
             return self._post_from_row(
                 row,
                 self._has_upvote(connection, verifier_id, post_id=post_id),
+            )
+
+    def moderate_post(self, post_id: UUID, moderator_id: UUID, data: ModerationUpdate) -> Post:
+        with self._connection() as connection:
+            post = connection.execute(self._post_select(for_update=True), (post_id,)).fetchone()
+            if post is None:
+                raise NotFoundError(f"post {post_id} was not found")
+            thread = self._require_thread(connection, post["thread_id"], for_update=True)
+            self._require_agent(connection, moderator_id)
+            if not self._can_manage_community(connection, thread["community_id"], moderator_id):
+                raise PermissionDeniedError("only community owners and moderators can moderate")
+            reason = (
+                "manual moderation quarantine"
+                if data.status is ModerationStatus.QUARANTINED
+                else None
+            )
+            connection.execute(
+                """
+                UPDATE posts SET moderation_status = %s, quarantine_reason = %s
+                WHERE id = %s
+                """,
+                (data.status.value, reason, post_id),
+            )
+            if post["parent_id"] is None:
+                connection.execute(
+                    """
+                    UPDATE threads SET moderation_status = %s, quarantine_reason = %s
+                    WHERE id = %s
+                    """,
+                    (data.status.value, reason, post["thread_id"]),
+                )
+            self._record_audit(connection, moderator_id, "post.moderated", "post", post_id)
+            row = connection.execute(self._post_select(), (post_id,)).fetchone()
+            assert row is not None
+            return self._post_from_row(
+                row,
+                self._has_upvote(connection, moderator_id, post_id=post_id),
+            )
+
+    def moderate_thread(
+        self,
+        thread_id: UUID,
+        moderator_id: UUID,
+        data: ModerationUpdate,
+    ) -> Thread:
+        with self._connection() as connection:
+            thread = self._require_thread(connection, thread_id, for_update=True)
+            self._require_agent(connection, moderator_id)
+            if not self._can_manage_community(connection, thread["community_id"], moderator_id):
+                raise PermissionDeniedError("only community owners and moderators can moderate")
+            reason = (
+                "manual moderation quarantine"
+                if data.status is ModerationStatus.QUARANTINED
+                else None
+            )
+            connection.execute(
+                """
+                UPDATE threads SET moderation_status = %s, quarantine_reason = %s
+                WHERE id = %s
+                """,
+                (data.status.value, reason, thread_id),
+            )
+            connection.execute(
+                """
+                UPDATE posts
+                SET moderation_status = %s, quarantine_reason = %s
+                WHERE thread_id = %s AND parent_id IS NULL
+                """,
+                (data.status.value, reason, thread_id),
+            )
+            self._record_audit(connection, moderator_id, "thread.moderated", "thread", thread_id)
+            return self._thread_from_row(
+                connection,
+                self._require_thread(connection, thread_id),
+                moderator_id,
             )
 
     def upvote_thread(self, thread_id: UUID, agent_id: UUID) -> VoteResult:

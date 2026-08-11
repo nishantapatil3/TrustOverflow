@@ -21,9 +21,13 @@ from .models import (
     ClaimRequest,
     Community,
     CommunityCreate,
+    CommunityMembership,
+    CommunitySubscription,
+    CommunityUpdate,
     EmailLogin,
     EmailLoginResponse,
     EvidenceObject,
+    ModerationUpdate,
     Post,
     PostCreate,
     PostUpdate,
@@ -407,6 +411,133 @@ def create_app(
         except NotFoundError as error:
             raise domain_error(error) from error
 
+    @application.patch(
+        "/communities/{community_id}",
+        response_model=Community,
+        tags=["communities"],
+    )
+    def update_community(
+        community_id: UUID,
+        payload: CommunityUpdate,
+        agent: Agent = Depends(current_agent),
+    ) -> Community:
+        try:
+            return exchange.update_community(community_id, agent.id, payload)
+        except (NotFoundError, ConflictError, PermissionDeniedError) as error:
+            raise domain_error(error) from error
+
+    @application.delete(
+        "/communities/{community_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["communities"],
+    )
+    def delete_community(
+        community_id: UUID,
+        agent: Agent = Depends(current_agent),
+    ) -> None:
+        try:
+            exchange.delete_community(community_id, agent.id)
+        except (NotFoundError, ConflictError, PermissionDeniedError) as error:
+            raise domain_error(error) from error
+
+    @application.post(
+        "/communities/{community_id}/members",
+        response_model=CommunityMembership,
+        status_code=status.HTTP_201_CREATED,
+        tags=["communities"],
+    )
+    def join_community(
+        community_id: UUID,
+        agent: Agent = Depends(current_agent),
+    ) -> CommunityMembership:
+        try:
+            return exchange.join_community(community_id, agent.id)
+        except (NotFoundError, ConflictError) as error:
+            raise domain_error(error) from error
+
+    @application.delete(
+        "/communities/{community_id}/members/me",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["communities"],
+    )
+    def leave_community(
+        community_id: UUID,
+        agent: Agent = Depends(current_agent),
+    ) -> None:
+        try:
+            exchange.leave_community(community_id, agent.id)
+        except (NotFoundError, ConflictError) as error:
+            raise domain_error(error) from error
+
+    @application.get(
+        "/communities/{community_id}/members",
+        response_model=list[CommunityMembership],
+        tags=["communities"],
+    )
+    def list_community_members(community_id: UUID) -> list[CommunityMembership]:
+        try:
+            return exchange.list_community_members(community_id)
+        except NotFoundError as error:
+            raise domain_error(error) from error
+
+    @application.post(
+        "/communities/{community_id}/moderators/{agent_id}",
+        response_model=CommunityMembership,
+        tags=["communities"],
+    )
+    def add_community_moderator(
+        community_id: UUID,
+        agent_id: UUID,
+        owner: Agent = Depends(current_agent),
+    ) -> CommunityMembership:
+        try:
+            return exchange.add_community_moderator(community_id, owner.id, agent_id)
+        except (NotFoundError, ConflictError, PermissionDeniedError) as error:
+            raise domain_error(error) from error
+
+    @application.delete(
+        "/communities/{community_id}/moderators/{agent_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["communities"],
+    )
+    def remove_community_moderator(
+        community_id: UUID,
+        agent_id: UUID,
+        owner: Agent = Depends(current_agent),
+    ) -> None:
+        try:
+            exchange.remove_community_moderator(community_id, owner.id, agent_id)
+        except (NotFoundError, ConflictError, PermissionDeniedError) as error:
+            raise domain_error(error) from error
+
+    @application.put(
+        "/communities/{community_id}/subscription",
+        response_model=CommunitySubscription,
+        tags=["communities"],
+    )
+    def subscribe_community(
+        community_id: UUID,
+        agent: Agent = Depends(current_agent),
+    ) -> CommunitySubscription:
+        try:
+            return exchange.subscribe_community(community_id, agent.id)
+        except (NotFoundError, ConflictError) as error:
+            raise domain_error(error) from error
+
+    @application.delete(
+        "/communities/{community_id}/subscription",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["communities"],
+    )
+    def unsubscribe_community(
+        community_id: UUID,
+        agent: Agent = Depends(current_agent),
+    ) -> None:
+        try:
+            exchange.unsubscribe_community(community_id, agent.id)
+        except (NotFoundError, ConflictError) as error:
+            raise domain_error(error) from error
+
     @application.post(
         "/threads",
         response_model=Thread,
@@ -417,7 +548,12 @@ def create_app(
         enforce_quota(agent, "thread")
         try:
             return exchange.create_thread(agent.id, payload)
-        except (NotFoundError, ConflictError, ProvenanceError) as error:
+        except (
+            NotFoundError,
+            ConflictError,
+            PermissionDeniedError,
+            ProvenanceError,
+        ) as error:
             raise domain_error(error) from error
 
     @application.get("/threads", response_model=list[Thread], tags=["threads"])
@@ -575,6 +711,36 @@ def create_app(
         try:
             return exchange.verify_post(post_id, agent.id, payload)
         except (NotFoundError, ConflictError) as error:
+            raise domain_error(error) from error
+
+    @application.patch(
+        "/posts/{post_id}/moderation",
+        response_model=Post,
+        tags=["moderation"],
+    )
+    def moderate_post(
+        post_id: UUID,
+        payload: ModerationUpdate,
+        agent: Agent = Depends(current_agent),
+    ) -> Post:
+        try:
+            return exchange.moderate_post(post_id, agent.id, payload)
+        except (NotFoundError, ConflictError, PermissionDeniedError) as error:
+            raise domain_error(error) from error
+
+    @application.patch(
+        "/threads/{thread_id}/moderation",
+        response_model=Thread,
+        tags=["moderation"],
+    )
+    def moderate_thread(
+        thread_id: UUID,
+        payload: ModerationUpdate,
+        agent: Agent = Depends(current_agent),
+    ) -> Thread:
+        try:
+            return exchange.moderate_thread(thread_id, agent.id, payload)
+        except (NotFoundError, ConflictError, PermissionDeniedError) as error:
             raise domain_error(error) from error
 
     # Mount after the HTTP routes so FastMCP can keep its conventional /mcp path.

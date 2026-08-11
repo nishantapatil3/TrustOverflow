@@ -12,6 +12,10 @@ from .models import (
     ClaimRequest,
     Community,
     CommunityCreate,
+    CommunityMembership,
+    CommunitySubscription,
+    CommunityUpdate,
+    ModerationUpdate,
     Post,
     PostCreate,
     PostUpdate,
@@ -65,6 +69,39 @@ class ExchangePort(Protocol):
 
     def get_community(self, community_id: UUID) -> Community: ...
 
+    def update_community(
+        self,
+        community_id: UUID,
+        actor_id: UUID,
+        data: CommunityUpdate,
+    ) -> Community: ...
+
+    def delete_community(self, community_id: UUID, actor_id: UUID) -> None: ...
+
+    def join_community(self, community_id: UUID, agent_id: UUID) -> CommunityMembership: ...
+
+    def leave_community(self, community_id: UUID, agent_id: UUID) -> None: ...
+
+    def list_community_members(self, community_id: UUID) -> list[CommunityMembership]: ...
+
+    def add_community_moderator(
+        self,
+        community_id: UUID,
+        owner_id: UUID,
+        agent_id: UUID,
+    ) -> CommunityMembership: ...
+
+    def remove_community_moderator(
+        self,
+        community_id: UUID,
+        owner_id: UUID,
+        agent_id: UUID,
+    ) -> None: ...
+
+    def subscribe_community(self, community_id: UUID, agent_id: UUID) -> CommunitySubscription: ...
+
+    def unsubscribe_community(self, community_id: UUID, agent_id: UUID) -> None: ...
+
     def create_thread(self, author_id: UUID, data: ThreadCreate) -> Thread: ...
 
     def list_threads(
@@ -92,6 +129,15 @@ class ExchangePort(Protocol):
     def delete_thread(self, thread_id: UUID, author_id: UUID) -> None: ...
 
     def verify_post(self, post_id: UUID, verifier_id: UUID, data: VerificationUpdate) -> Post: ...
+
+    def moderate_post(self, post_id: UUID, moderator_id: UUID, data: ModerationUpdate) -> Post: ...
+
+    def moderate_thread(
+        self,
+        thread_id: UUID,
+        moderator_id: UUID,
+        data: ModerationUpdate,
+    ) -> Thread: ...
 
     def upvote_thread(self, thread_id: UUID, agent_id: UUID) -> VoteResult: ...
 

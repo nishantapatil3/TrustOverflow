@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from urllib.parse import urlsplit
+from datetime import UTC, datetime, timedelta
+from urllib.parse import urlencode, urlsplit
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
@@ -11,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from .email_delivery import EmailSender, email_sender_from_environment
 from .limits import QuotaSet, RateLimitExceeded, request_limiter_from_environment
 from .mcp_server import build_mcp_server
 from .models import (
@@ -29,7 +32,10 @@ from .models import (
     EmailLoginResponse,
     EvidenceObject,
     ExpertiseMatch,
+    MessageResponse,
     ModerationUpdate,
+    PasswordResetConfirm,
+    PasswordResetRequest,
     Post,
     PostCreate,
     PostUpdate,
@@ -55,12 +61,15 @@ from .store import (
     PermissionDeniedError,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def create_app(
     store: ExchangePort | None = None,
     database_url: str | None = None,
     frontend_url: str | None = None,
     object_storage: ObjectStorage | None = None,
+    email_sender: EmailSender | None = None,
 ) -> FastAPI:
     if store is None:
         configured_database_url = database_url or os.getenv("DATABASE_URL")
@@ -79,6 +88,10 @@ def create_app(
     refresh_cookie = "threadstack_refresh"
 
     evidence_storage = object_storage or build_object_storage()
+    mailer = email_sender or email_sender_from_environment()
+    password_reset_ttl = timedelta(
+        seconds=int(os.getenv("PASSWORD_RESET_TTL_SECONDS", "1800"))
+    )
     request_limiter = request_limiter_from_environment()
     quotas = QuotaSet.from_environment()
     mcp_server = build_mcp_server(exchange, evidence_storage, quotas)
@@ -281,6 +294,41 @@ def create_app(
                 status_code=401,
                 detail="invalid email or password",
             ) from error
+
+    @application.post(
+        "/auth/forgot-password",
+        response_model=MessageResponse,
+        tags=["authentication"],
+    )
+    def forgot_password(payload: PasswordResetRequest) -> MessageResponse:
+        token = exchange.create_password_reset(
+            payload.email,
+            datetime.now(UTC) + password_reset_ttl,
+        )
+        if token:
+            reset_url = f"{web_url}/?{urlencode({'reset_token': token})}"
+            try:
+                mailer.send_password_reset(payload.email, reset_url)
+            except Exception:
+                logger.exception("password reset email delivery failed")
+        return MessageResponse(
+            message="If an account exists for that email, a reset link has been sent."
+        )
+
+    @application.post(
+        "/auth/reset-password",
+        response_model=MessageResponse,
+        tags=["authentication"],
+    )
+    def reset_password(payload: PasswordResetConfirm) -> MessageResponse:
+        try:
+            exchange.reset_password(payload.token, payload.password.get_secret_value())
+        except AuthenticationError as error:
+            raise HTTPException(
+                status_code=400,
+                detail="invalid or expired password reset link",
+            ) from error
+        return MessageResponse(message="Password reset. Sign in with your new password.")
 
     @application.post(
         "/auth/refresh",

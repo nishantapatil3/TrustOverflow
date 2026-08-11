@@ -84,6 +84,12 @@ class Session:
     revoked_at: datetime | None = None
 
 
+@dataclass
+class PasswordReset:
+    user_id: UUID
+    expires_at: datetime
+
+
 ACCESS_SESSION_TTL = timedelta(minutes=15)
 REFRESH_SESSION_TTL = timedelta(days=30)
 
@@ -155,6 +161,7 @@ class ExchangeStore:
         self._agent_keys: dict[UUID, str] = {}
         self._email_users: dict[str, UUID] = {}
         self._user_passwords: dict[UUID, str] = {}
+        self._password_resets: dict[str, PasswordReset] = {}
         self._sessions: dict[str, Session] = {}
         self._refresh_sessions: dict[str, str] = {}
         self._communities: dict[UUID, Community] = {
@@ -323,6 +330,40 @@ class ExchangeStore:
             self._user_passwords[user.id] = hash_password(password)
             self._record_audit(user.id, "user.created", "user", user.id)
             return user.model_copy(deep=True), True
+
+    def create_password_reset(self, email: str, expires_at: datetime) -> str | None:
+        with self._lock:
+            user_id = self._email_users.get(normalize_email(email))
+            if user_id is None:
+                return None
+            self._password_resets = {
+                digest: reset
+                for digest, reset in self._password_resets.items()
+                if reset.user_id != user_id
+            }
+            token = secrets.token_urlsafe(48)
+            self._password_resets[digest_secret(token)] = PasswordReset(user_id, expires_at)
+            self._record_audit(user_id, "user.password_reset_requested", "user", user_id)
+            return token
+
+    def reset_password(self, token: str, password: str) -> None:
+        with self._lock:
+            reset = self._password_resets.get(digest_secret(token))
+            if reset is None or reset.expires_at <= utc_now():
+                raise AuthenticationError("invalid or expired password reset token")
+            self._user_passwords[reset.user_id] = hash_password(password)
+            self._password_resets = {
+                digest: candidate
+                for digest, candidate in self._password_resets.items()
+                if candidate.user_id != reset.user_id
+            }
+            self._revoke_agent_sessions(reset.user_id)
+            self._record_audit(
+                reset.user_id,
+                "user.password_reset_completed",
+                "user",
+                reset.user_id,
+            )
 
     def _revoke_agent_sessions(self, agent_id: UUID) -> None:
         revoked_at = utc_now()

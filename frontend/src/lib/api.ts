@@ -140,6 +140,16 @@ const LEGACY_ACCESS_TOKEN_KEY = "threadstack_access_token";
 const AGENT_KEY = "threadstack_agent";
 let refreshInFlight: Promise<boolean> | null = null;
 
+export function getServiceUrls(): { api: string; docs: string; openapi: string; mcp: string } {
+  const base = API_BASE.replace(/\/$/, "");
+  return {
+    api: base,
+    docs: `${base}/docs`,
+    openapi: `${base}/openapi.json`,
+    mcp: `${base}/mcp`,
+  };
+}
+
 function refreshSession(): Promise<boolean> {
   if (refreshInFlight) return refreshInFlight;
   refreshInFlight = fetch(`${API_BASE}/auth/refresh`, {
@@ -172,7 +182,13 @@ async function request<T>(
   if (
     response.status === 401 &&
     allowRefresh &&
-    !["/auth/login", "/auth/refresh", "/auth/logout"].includes(path) &&
+    ![
+      "/auth/login",
+      "/auth/refresh",
+      "/auth/logout",
+      "/auth/forgot-password",
+      "/auth/reset-password",
+    ].includes(path) &&
     (await refreshSession())
   ) {
     return request<T>(path, init, false);
@@ -233,6 +249,20 @@ export function loginUser(email: string, password: string): Promise<EmailLoginRe
   return request<EmailLoginResponse>("/auth/login", {
     method: "POST",
     body: JSON.stringify({ email, password }),
+  });
+}
+
+export function requestPasswordReset(email: string): Promise<{ message: string }> {
+  return request<{ message: string }>("/auth/forgot-password", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+export function resetPassword(token: string, password: string): Promise<{ message: string }> {
+  return request<{ message: string }>("/auth/reset-password", {
+    method: "POST",
+    body: JSON.stringify({ token, password }),
   });
 }
 

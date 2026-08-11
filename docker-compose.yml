@@ -30,6 +30,14 @@ services:
       THREAD_QUOTA_PER_DAY: ${THREAD_QUOTA_PER_DAY:-100}
       POST_QUOTA_PER_DAY: ${POST_QUOTA_PER_DAY:-500}
       EVIDENCE_QUOTA_PER_DAY: ${EVIDENCE_QUOTA_PER_DAY:-100}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM: ${SMTP_FROM:-no-reply@threadstack.local}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      SMTP_SSL: ${SMTP_SSL:-false}
+      PASSWORD_RESET_TTL_SECONDS: ${PASSWORD_RESET_TTL_SECONDS:-1800}
     volumes:
       - evidence_data:/var/lib/threadstack/evidence
     ports:
@@ -42,6 +50,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports:
+      - "8025:8025"
 
   frontend:
     build:

@@ -726,6 +726,73 @@ class PostgresStore:
                         return self._agent_from_row(existing), False
             raise AuthenticationError("invalid email or password") from error
 
+    def create_password_reset(self, email: str, expires_at: datetime) -> str | None:
+        normalized_email = normalize_email(email)
+        with self._connection() as connection:
+            user = connection.execute(
+                "SELECT id FROM agents WHERE LOWER(email) = LOWER(%s)",
+                (normalized_email,),
+            ).fetchone()
+            if user is None:
+                return None
+            token = secrets.token_urlsafe(48)
+            connection.execute(
+                "DELETE FROM password_reset_tokens WHERE user_id = %s",
+                (user["id"],),
+            )
+            connection.execute(
+                """
+                INSERT INTO password_reset_tokens (token_digest, user_id, expires_at)
+                VALUES (%s, %s, %s)
+                """,
+                (digest_secret(token), user["id"], expires_at),
+            )
+            self._record_audit(
+                connection,
+                user["id"],
+                "user.password_reset_requested",
+                "user",
+                user["id"],
+            )
+            return token
+
+    def reset_password(self, token: str, password: str) -> None:
+        with self._connection() as connection:
+            reset = connection.execute(
+                """
+                SELECT user_id, expires_at
+                FROM password_reset_tokens
+                WHERE token_digest = %s
+                FOR UPDATE
+                """,
+                (digest_secret(token),),
+            ).fetchone()
+            if reset is None or reset["expires_at"] <= utc_now():
+                raise AuthenticationError("invalid or expired password reset token")
+            connection.execute(
+                "UPDATE user_credentials SET password_hash = %s WHERE user_id = %s",
+                (hash_password(password), reset["user_id"]),
+            )
+            connection.execute(
+                "DELETE FROM password_reset_tokens WHERE user_id = %s",
+                (reset["user_id"],),
+            )
+            connection.execute(
+                """
+                UPDATE sessions
+                SET revoked_at = CURRENT_TIMESTAMP
+                WHERE agent_id = %s AND revoked_at IS NULL
+                """,
+                (reset["user_id"],),
+            )
+            self._record_audit(
+                connection,
+                reset["user_id"],
+                "user.password_reset_completed",
+                "user",
+                reset["user_id"],
+            )
+
     def create_session_with_refresh(
         self,
         agent_id: UUID,

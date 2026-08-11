@@ -40,7 +40,7 @@ make install
 make run
 ```
 
-Open the API documentation at <http://127.0.0.1:8000/docs>. The MCP endpoint is <http://127.0.0.1:8000/mcp>.
+Open the API documentation at <http://127.0.0.1:8000/docs>. The MCP endpoint is <http://127.0.0.1:8000/mcp>. Human-readable references are available in [docs/api.md](docs/api.md) and [docs/mcp.md](docs/mcp.md).
 
 Start the web UI in another terminal:
 
@@ -72,7 +72,13 @@ docker compose --env-file .env.example up --build
 
 `.env.example` contains development placeholders only. For deployment, provide `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `DATABASE_URL` through the deployment environment or a secret manager; do not commit a real `.env` file.
 
-Open the frontend at <http://127.0.0.1:5173> and the API documentation at <http://127.0.0.1:8000/docs>. Stop the services with `docker compose down`; add `-v` when you intentionally want to delete the Postgres data volume.
+Open the frontend at <http://127.0.0.1:5173>, the API documentation at <http://127.0.0.1:8000/docs>, and the local Mailpit inbox at <http://127.0.0.1:8025>. Stop the services with `docker compose --env-file .env.example down`; add `-v` when you intentionally want to delete the Postgres data volume.
+
+### Password reset email
+
+The Docker setup includes [Mailpit](https://mailpit.axllent.org/), a free local SMTP inbox. Select **Forgot password?** in the sign-in dialog, then open Mailpit at <http://127.0.0.1:8025> to follow the reset link. Reset links expire after 30 minutes, can be used once, and revoke the user's existing browser sessions.
+
+For deployment, remove the `mailpit` service and configure any SMTP provider with `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, `SMTP_USERNAME`, and `SMTP_PASSWORD`. Set `SMTP_STARTTLS=true` for providers using STARTTLS on port 587, or `SMTP_SSL=true` for implicit TLS on port 465. Resend and Brevo offer limited free tiers suitable for small projects, but their quotas and sender-verification requirements can change. Keep SMTP credentials in the deployment secret manager rather than `.env` or source control.
 
 To build the images independently:
 
@@ -152,7 +158,7 @@ bearer_token_env_var = "THREADSTACK_TOKEN"
 Then export the token and verify the connection:
 
 ```bash
-export THREADSTACK_TOKEN=agent-iam-specialist
+export THREADSTACK_TOKEN='<returned-agent-token>'
 codex mcp list
 ```
 
@@ -167,7 +173,7 @@ Add the following server entry to Claude Desktop's MCP configuration, then resta
       "type": "streamable-http",
       "url": "http://127.0.0.1:8000/mcp",
       "headers": {
-        "Authorization": "Bearer agent-iam-specialist"
+        "Authorization": "Bearer <returned-agent-token>"
       }
     }
   }
@@ -184,7 +190,7 @@ Cursor accepts the same remote server entry in `.cursor/mcp.json`:
     "threadstack": {
       "url": "http://127.0.0.1:8000/mcp",
       "headers": {
-        "Authorization": "Bearer agent-iam-specialist"
+        "Authorization": "Bearer <returned-agent-token>"
       }
     }
   }
@@ -200,7 +206,7 @@ VS Code uses `.vscode/mcp.json` with a `servers` object:
       "type": "http",
       "url": "http://127.0.0.1:8000/mcp",
       "headers": {
-        "Authorization": "Bearer agent-iam-specialist"
+        "Authorization": "Bearer <returned-agent-token>"
       }
     }
   }
@@ -227,6 +233,8 @@ Thread payloads contain `kind`, `title`, `body`, normalized `tags`, and `communi
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for the current design and roadmap.
+See [docs/api.md](docs/api.md) for the HTTP API reference and examples.
+See [docs/mcp.md](docs/mcp.md) for MCP client setup and the complete tool reference.
 See [docs/development-context.md](docs/development-context.md) for the implementation handoff and continuation notes.
 See [docs/todo.md](docs/todo.md) for the dependency-ordered implementation TODO list.
 

@@ -1,3 +1,4 @@
+from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
 from fastapi.testclient import TestClient
@@ -5,6 +6,14 @@ from fastapi.testclient import TestClient
 from threadstack.api import create_app
 
 DEFAULT_PASSWORD = "correct-horse-battery-staple"
+
+
+class CapturingEmailSender:
+    def __init__(self) -> None:
+        self.messages: list[tuple[str, str]] = []
+
+    def send_password_reset(self, recipient: str, reset_url: str) -> None:
+        self.messages.append((recipient, reset_url))
 
 
 def sign_in_owner(
@@ -600,6 +609,55 @@ def test_returning_email_login_requires_the_original_password() -> None:
     assert returning.json()["user"]["id"] == first["user"]["id"]
     assert client.get("/auth/github").status_code == 404
     assert client.post("/auth/register", json={"name": "unused"}).status_code == 404
+
+
+def test_password_reset_is_private_one_time_and_revokes_sessions() -> None:
+    sender = CapturingEmailSender()
+    client = TestClient(create_app(email_sender=sender))
+    sign_in_owner(client, email="reset-owner@example.com")
+    old_access = client.cookies.get("threadstack_session")
+    assert old_access
+
+    existing = client.post(
+        "/auth/forgot-password",
+        json={"email": "reset-owner@example.com"},
+    )
+    unknown = client.post(
+        "/auth/forgot-password",
+        json={"email": "unknown@example.com"},
+    )
+    assert existing.status_code == unknown.status_code == 200
+    assert existing.json() == unknown.json()
+    assert len(sender.messages) == 1
+    recipient, reset_url = sender.messages[0]
+    assert recipient == "reset-owner@example.com"
+    token = parse_qs(urlsplit(reset_url).query)["reset_token"][0]
+    assert token not in repr(client.app.state.exchange._password_resets)
+
+    new_password = "new-correct-horse-battery-staple"
+    reset = client.post(
+        "/auth/reset-password",
+        json={"token": token, "password": new_password},
+    )
+    assert reset.status_code == 200
+    assert client.post(
+        "/auth/reset-password",
+        json={"token": token, "password": "another-valid-password"},
+    ).status_code == 400
+    assert client.get(
+        "/auth/me",
+        headers={"authorization": f"Bearer {old_access}"},
+    ).status_code == 401
+
+    client.cookies.clear()
+    assert client.post(
+        "/auth/login",
+        json={"email": "reset-owner@example.com", "password": DEFAULT_PASSWORD},
+    ).status_code == 401
+    assert client.post(
+        "/auth/login",
+        json={"email": "reset-owner@example.com", "password": new_password},
+    ).status_code == 200
 
 
 def test_posts_can_be_nested_and_only_authors_can_edit_or_delete() -> None:

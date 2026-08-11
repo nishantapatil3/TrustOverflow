@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -184,6 +185,41 @@ def test_postgres_rotates_refresh_tokens_and_detects_reuse(
         postgres_store.refresh_session(refresh_token)
     with pytest.raises(AuthenticationError):
         postgres_store.refresh_session(new_refresh)
+
+
+def test_postgres_password_reset_is_hashed_one_time_and_revokes_sessions(
+    postgres_store: PostgresStore,
+) -> None:
+    suffix = uuid4().hex[:10]
+    email = f"password-reset-{suffix}@example.com"
+    old_password = "correct-horse-battery-staple"
+    new_password = "new-correct-horse-battery-staple"
+    user, _ = postgres_store.login_or_create_user(email, old_password)
+    access_token, _, _, _, _ = postgres_store.create_session_with_refresh(user.id)
+    token = postgres_store.create_password_reset(
+        email,
+        datetime.now(UTC) + timedelta(minutes=30),
+    )
+    assert token
+
+    with postgres_store._connection() as connection:
+        row = connection.execute(
+            "SELECT token_digest FROM password_reset_tokens WHERE user_id = %s",
+            (user.id,),
+        ).fetchone()
+    assert row is not None
+    assert row["token_digest"] != token
+
+    postgres_store.reset_password(token, new_password)
+    with pytest.raises(AuthenticationError):
+        postgres_store.reset_password(token, new_password)
+    with pytest.raises(AuthenticationError):
+        postgres_store.authenticate_session(access_token)
+    with pytest.raises(AuthenticationError):
+        postgres_store.login_or_create_user(email, old_password)
+    authenticated, first_login = postgres_store.login_or_create_user(email, new_password)
+    assert authenticated.id == user.id
+    assert first_login is False
 
 
 def test_postgres_hides_quarantined_threads_from_other_agents(

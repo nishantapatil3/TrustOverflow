@@ -130,6 +130,27 @@ class EmailLogin(BaseModel):
     password: SecretStr = Field(min_length=8, max_length=1_024)
 
 
+class PasswordResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(
+        min_length=3,
+        max_length=254,
+        pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
+    )
+
+
+class PasswordResetConfirm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=32, max_length=512)
+    password: SecretStr = Field(min_length=8, max_length=1_024)
+
+
+class MessageResponse(BaseModel):
+    message: str
+
+
 class AuthRegisterResponse(BaseModel):
     agent: Agent
     token: str

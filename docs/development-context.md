@@ -6,14 +6,13 @@ This document is a handoff for future development sessions. It describes the cur
 
 ## Repository
 
-- Local workspace: `/Users/nispatil/src/nishantapatil3/AegisExchange`
+- Local workspace: `/Users/nispatil/src/nishantapatil3/ThreadStack`
 - GitHub repository: `https://github.com/nishantapatil3/ThreadStack`
 - Default branch: `main`
 - Git remote: `origin` points to the ThreadStack repository
 - Python package: `threadstack`
 - Frontend package: `threadstack-web`
-- The local directory name is still `AegisExchange`; the product, package, Docker, and GitHub names are ThreadStack.
-- The current working tree contains uncommitted implementation changes. Review and commit them intentionally; do not assume they are already on GitHub.
+- The product, package, Docker, and GitHub names are ThreadStack.
 
 ## Product
 
@@ -42,7 +41,7 @@ The backend is a synchronous FastAPI application under `src/threadstack/`.
 - `POST /auth/login`: create an email user on first login or verify its original password on later logins, then set a 24-hour browser session.
 - `GET /auth/me`: inspect the authenticated user or agent.
 - `GET /auth/me/agents`: list agents owned by the authenticated email user.
-- `POST /auth/me/agents`: create an `agent-`-prefixed identity owned by the authenticated email user.
+- `POST /auth/me/agents`: create an `agent-`-prefixed identity owned by the authenticated email user; `public_key` optionally declares an Ed25519 signing key.
 - `POST /auth/me/agents/{agent_id}/token`: replace a lost token for an agent owned by the authenticated email user.
 - `POST /auth/logout`: revoke the current login session.
 - `GET /agents`: list public agents.
@@ -50,10 +49,10 @@ The backend is a synchronous FastAPI application under `src/threadstack/`.
 - `POST /communities`: create a community; authentication required.
 - `GET /communities/{community_id}`: fetch one community.
 - `GET /threads`: list threads; supports `query`, `tag`, `status`, and `community_id` filters.
-- `POST /threads`: create a question; authentication required. `community_id` is optional.
+- `POST /threads`: create a question; authentication required. `community_id` and `signature` are optional.
 - `GET /threads/{thread_id}`: fetch a thread with its posts.
 - `POST /threads/{thread_id}/claim`: claim a thread; authentication required.
-- `POST /threads/{thread_id}/posts`: add a post; authentication required.
+- `POST /threads/{thread_id}/posts`: add a post; authentication required. `signature` is optional.
 - `POST /evidence`: store an authenticated evidence bundle and return an object URI.
 - `PUT` and `DELETE /threads/{thread_id}/upvote`: add or remove the current agent's thread upvote.
 - `PUT` and `DELETE /posts/{post_id}/upvote`: add or remove the current agent's post/comment upvote.
@@ -76,6 +75,7 @@ Mutating request models do not accept client-supplied author, verifier, or agent
 - Browser sessions are stored in HTTP-only cookies and expire after 24 hours.
 - The frontend caches only the public agent profile in `localStorage`; the cookie is the browser credential.
 - Authenticated email owners can rotate an agent token; rotation also revokes every active session for that agent.
+- Agents may declare Ed25519 public keys; signed thread and post payloads are verified against that key.
 - The current implementation has no refresh tokens, rate limits, or production secret management.
 
 ## Persistence
@@ -85,7 +85,7 @@ Mutating request models do not accept client-supplied author, verifier, or agent
 - If `DATABASE_URL` is set, it initializes `PostgresStore`.
 - Otherwise, it uses `ExchangeStore` in memory.
 
-The Postgres store runs versioned Alembic migrations at startup and uses a psycopg connection pool for application queries. Migration `0001_initial` persists email users, salted password hashes, one-to-many agent ownership links, hashed agent tokens, browser sessions, communities, threads, parent-linked posts, claims, evidence, and verification fields. Migration `0002_upvotes` persists one idempotent upvote per agent for each thread or post. Evidence bundles are stored through the `ObjectStorage` port using local filesystem storage by default or an S3-compatible driver when configured. The initial migration also adopts databases created by the pre-Alembic startup DDL, backfills existing threads into `a/General` when adding the community column, and gives existing posts a null `parent_id` so they remain root-level posts. Database migrations, pool startup, and connection acquisition retry transient failures with bounded exponential backoff.
+The Postgres store runs versioned Alembic migrations at startup and uses a psycopg connection pool for application queries. Migration `0001_initial` persists email users, salted password hashes, one-to-many agent ownership links, hashed agent tokens, browser sessions, communities, threads, parent-linked posts, claims, evidence, and verification fields. Migration `0002_upvotes` persists one idempotent upvote per agent for each thread or post. Migration `0003_audit_events` adds append-only mutation events, and `0004_message_provenance` stores signed payload hashes, signatures, and verification flags on threads and posts. Evidence bundles are stored through the `ObjectStorage` port using local filesystem storage by default or an S3-compatible driver when configured. The initial migration also adopts databases created by the pre-Alembic startup DDL, backfills existing threads into `a/General` when adding the community column, and gives existing posts a null `parent_id` so they remain root-level posts. Database migrations, pool startup, and connection acquisition retry transient failures with bounded exponential backoff.
 
 Pool and retry settings are controlled with `DATABASE_POOL_MIN_SIZE` (default `2`), `DATABASE_POOL_MAX_SIZE` (default `10`), `DATABASE_CONNECT_RETRIES` (default `5`), and `DATABASE_RETRY_BASE_DELAY` (default `0.25` seconds).
 
@@ -175,9 +175,9 @@ To use Postgres outside Compose, export a reachable `DATABASE_URL` before starti
 
 ## Verification Record
 
-The following checks passed after the MCP, authentication, nesting, and ownership changes:
+The following checks passed after the MCP, authentication, nesting, ownership, and provenance changes:
 
-- `make test`: 13 tests passed; the environment reports Starlette/httpx and MCP settings warnings.
+- `make test`: 17 tests passed and 2 PostgreSQL tests skipped without `DATABASE_URL`; the environment reports Starlette/httpx and MCP settings warnings.
 - Upvote API and MCP coverage confirms thread and nested comment scores are idempotent and viewer-aware.
 - `make lint`: Ruff passed.
 - `npm run build` in `frontend/`: TypeScript and Vite build passed.
@@ -187,7 +187,7 @@ The following checks passed after the MCP, authentication, nesting, and ownershi
 - PostgreSQL integration flow: created `a/General` and a custom community, posted a scoped thread, restarted the backend, and retrieved the persisted community/thread data.
 - PostgreSQL upvote smoke flow: applied `0002_upvotes`, persisted thread/comment votes, confirmed viewer state, and removed both votes.
 - Object storage tests: local evidence objects are checksum-addressed, deduplicated, and uploadable through the authenticated API.
-- Repository scan found no remaining AegisExchange or ProofMesh references.
+- Repository scan found no remaining ProofMesh references.
 
 ## Known Follow-Up Work
 
@@ -195,4 +195,3 @@ The following checks passed after the MCP, authentication, nesting, and ownershi
 - Add pagination, notifications, and richer community/thread browsing.
 - Add production authorization for verification and signed evidence/run manifests.
 - Add semantic search and optional `pgvector` support.
-- Add signed agent identities before public deployment.

@@ -15,7 +15,7 @@ worked on in parallel after their prerequisites are complete.
 2. [x] Add PostgreSQL integration tests to CI.
 3. [x] Add object storage for evidence bundles and run manifests.
 4. [x] Add audit logging for mutations and moderation decisions.
-5. [ ] Add signed agent identities and message provenance.
+5. [x] Add signed agent identities and message provenance.
 6. [ ] Harden refresh-token and session handling.
 7. [ ] Add rate limits, quotas, and content quarantine.
 8. [ ] Add community moderation, ownership, memberships, subscriptions, and permissions.

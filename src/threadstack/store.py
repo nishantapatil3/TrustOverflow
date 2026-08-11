@@ -35,6 +35,12 @@ from .models import (
     agent_username,
     community_slug,
 )
+from .provenance import (
+    build_provenance,
+    post_payload,
+    thread_payload,
+    validate_public_key,
+)
 
 
 class StoreError(Exception):
@@ -198,6 +204,7 @@ class ExchangeStore:
         )
 
     def register_agent(self, owner_id: UUID, data: AgentCreate) -> tuple[Agent, str]:
+        validate_public_key(data.public_key)
         with self._lock:
             owner = self.require_agent(owner_id)
             if owner.account_type is not AccountType.USER or owner.email is None:
@@ -387,18 +394,31 @@ class ExchangeStore:
 
     def create_thread(self, author_id: UUID, data: ThreadCreate) -> Thread:
         with self._lock:
-            self.require_agent(author_id)
+            author = self.require_agent(author_id)
             community_id = data.community_id or DEFAULT_COMMUNITY_ID
             self.require_community(community_id)
+            normalized_tags = sorted({tag.casefold() for tag in data.tags})
+            provenance = build_provenance(
+                signer_id=author_id,
+                public_key=author.public_key,
+                signature=data.signature,
+                payload=thread_payload(
+                    title=data.title,
+                    body=data.body,
+                    tags=normalized_tags,
+                    community_id=community_id,
+                ),
+            )
             now = utc_now()
             thread = Thread(
                 id=uuid4(),
                 community_id=community_id,
                 title=data.title,
-                tags=sorted({tag.casefold() for tag in data.tags}),
+                tags=normalized_tags,
                 author_id=author_id,
                 created_at=now,
                 updated_at=now,
+                provenance=provenance,
             )
             root_post = Post(
                 id=uuid4(),
@@ -456,7 +476,7 @@ class ExchangeStore:
     def add_post(self, thread_id: UUID, author_id: UUID, data: PostCreate) -> Post:
         with self._lock:
             thread = self.require_thread(thread_id)
-            self.require_agent(author_id)
+            author = self.require_agent(author_id)
             if thread.status in {ThreadStatus.RESOLVED, ThreadStatus.CLOSED}:
                 raise ConflictError("cannot add a post to a resolved or closed thread")
             if data.parent_id is not None:
@@ -466,12 +486,26 @@ class ExchangeStore:
                         f"parent post {data.parent_id} was not found in this thread"
                     )
 
+            provenance = build_provenance(
+                signer_id=author_id,
+                public_key=author.public_key,
+                signature=data.signature,
+                payload=post_payload(
+                    thread_id=thread_id,
+                    parent_id=data.parent_id,
+                    post_type=data.type,
+                    body=data.body,
+                    evidence=data.evidence,
+                    confidence=data.confidence,
+                ),
+            )
             post = Post(
                 id=uuid4(),
                 thread_id=thread_id,
                 author_id=author_id,
                 created_at=utc_now(),
                 **data.model_dump(),
+                provenance=provenance,
             )
             thread.posts.append(post)
             thread.status = ThreadStatus.IN_PROGRESS
@@ -485,15 +519,40 @@ class ExchangeStore:
             post = self._posts.get(post_id)
             if post is None:
                 raise NotFoundError(f"post {post_id} was not found")
-            self.require_agent(author_id)
+            author = self.require_agent(author_id)
             if post.author_id != author_id:
                 raise PermissionDeniedError("only the post author can edit this post")
 
             changes = data.model_dump(exclude_unset=True)
             if not changes:
                 raise ConflictError("at least one post field must be provided")
-            for field, value in changes.items():
-                setattr(post, field, value)
+            post_type = data.type if data.type is not None else post.type
+            body = data.body if data.body is not None else post.body
+            evidence = data.evidence if data.evidence is not None else post.evidence
+            confidence = data.confidence if data.confidence is not None else post.confidence
+            provenance = build_provenance(
+                signer_id=author_id,
+                public_key=author.public_key,
+                signature=data.signature,
+                payload=post_payload(
+                    thread_id=post.thread_id,
+                    parent_id=post.parent_id,
+                    post_type=post_type,
+                    body=body,
+                    evidence=evidence,
+                    confidence=confidence,
+                ),
+            )
+            if data.type is not None:
+                post.type = data.type
+            if data.body is not None:
+                post.body = data.body
+            if data.evidence is not None:
+                post.evidence = data.evidence
+            if data.confidence is not None:
+                post.confidence = data.confidence
+            post.signature = data.signature
+            post.provenance = provenance
             thread = self.require_thread(post.thread_id)
             thread.updated_at = utc_now()
             self._record_audit(author_id, "post.updated", "post", post_id)
@@ -538,25 +597,44 @@ class ExchangeStore:
     def update_thread(self, thread_id: UUID, author_id: UUID, data: ThreadUpdate) -> Thread:
         with self._lock:
             thread = self.require_thread(thread_id)
-            self.require_agent(author_id)
+            author = self.require_agent(author_id)
             if thread.author_id != author_id:
                 raise PermissionDeniedError("only the thread author can edit this thread")
 
             changes = data.model_dump(exclude_unset=True)
             if not changes:
                 raise ConflictError("at least one thread field must be provided")
+            title = data.title if data.title is not None else thread.title
+            tags = (
+                sorted({tag.casefold() for tag in data.tags})
+                if data.tags is not None
+                else thread.tags
+            )
+            root_post = next(
+                (post for post in thread.posts if post.parent_id is None),
+                None,
+            )
+            body = data.body if data.body is not None else (root_post.body if root_post else "")
+            provenance = build_provenance(
+                signer_id=author_id,
+                public_key=author.public_key,
+                signature=data.signature,
+                payload=thread_payload(
+                    title=title,
+                    body=body,
+                    tags=tags,
+                    community_id=thread.community_id,
+                ),
+            )
             if "title" in changes:
                 thread.title = changes["title"]
             if "tags" in changes:
                 thread.tags = sorted({tag.casefold() for tag in changes["tags"]})
             if "body" in changes:
-                root_post = next(
-                    (post for post in thread.posts if post.parent_id is None),
-                    None,
-                )
                 if root_post is None:
                     raise ConflictError("thread has no root post")
                 root_post.body = changes["body"]
+            thread.provenance = provenance
             thread.updated_at = utc_now()
             self._record_audit(author_id, "thread.updated", "thread", thread_id)
             return self._thread_view(thread, author_id)

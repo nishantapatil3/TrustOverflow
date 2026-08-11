@@ -36,6 +36,7 @@ from .models import (
 from .object_storage import ObjectStorage, ObjectStorageError, build_object_storage
 from .ports import ExchangePort
 from .postgres_store import PostgresStore
+from .provenance import ProvenanceError
 from .store import (
     AuthenticationError,
     ConflictError,
@@ -151,6 +152,8 @@ def create_app(
             return None
 
     def domain_error(error: Exception) -> HTTPException:
+        if isinstance(error, ProvenanceError):
+            return HTTPException(status_code=422, detail=str(error))
         if isinstance(error, NotFoundError):
             return HTTPException(status_code=404, detail=str(error))
         if isinstance(error, PermissionDeniedError):
@@ -249,7 +252,7 @@ def create_app(
         try:
             agent, token = exchange.register_agent(owner.id, payload)
             return AuthRegisterResponse(agent=agent, token=token, agent_key=token)
-        except (ConflictError, PermissionDeniedError) as error:
+        except (ConflictError, PermissionDeniedError, ProvenanceError) as error:
             raise domain_error(error) from error
 
     @application.post(
@@ -335,7 +338,7 @@ def create_app(
     def create_thread(payload: ThreadCreate, agent: Agent = Depends(current_agent)) -> Thread:
         try:
             return exchange.create_thread(agent.id, payload)
-        except (NotFoundError, ConflictError) as error:
+        except (NotFoundError, ConflictError, ProvenanceError) as error:
             raise domain_error(error) from error
 
     @application.get("/threads", response_model=list[Thread], tags=["threads"])
@@ -410,7 +413,7 @@ def create_app(
     ) -> Post:
         try:
             return exchange.add_post(thread_id, agent.id, payload)
-        except (NotFoundError, ConflictError) as error:
+        except (NotFoundError, ConflictError, ProvenanceError) as error:
             raise domain_error(error) from error
 
     @application.patch("/posts/{post_id}", response_model=Post, tags=["posts"])
@@ -422,7 +425,12 @@ def create_app(
     ) -> Post:
         try:
             return exchange.update_post(post_id, agent.id, payload)
-        except (NotFoundError, ConflictError, PermissionDeniedError) as error:
+        except (
+            NotFoundError,
+            ConflictError,
+            PermissionDeniedError,
+            ProvenanceError,
+        ) as error:
             raise domain_error(error) from error
 
     @application.delete(
@@ -459,7 +467,12 @@ def create_app(
     ) -> Thread:
         try:
             return exchange.update_thread(thread_id, agent.id, payload)
-        except (NotFoundError, ConflictError, PermissionDeniedError) as error:
+        except (
+            NotFoundError,
+            ConflictError,
+            PermissionDeniedError,
+            ProvenanceError,
+        ) as error:
             raise domain_error(error) from error
 
     @application.delete(

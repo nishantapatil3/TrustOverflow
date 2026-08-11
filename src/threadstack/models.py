@@ -134,6 +134,13 @@ class EvidenceObject(BaseModel):
     content_type: str
 
 
+class Provenance(BaseModel):
+    signer_id: UUID
+    payload_hash: str
+    signature: str | None = None
+    verified: bool = False
+
+
 class Verification(BaseModel):
     status: VerificationStatus = VerificationStatus.UNVERIFIED
     verifier_id: UUID | None = None
@@ -152,6 +159,7 @@ class PostCreate(BaseModel):
         default=None,
         validation_alias=AliasChoices("parent_id", "parent_post_id"),
     )
+    signature: str | None = Field(default=None, max_length=4_096)
 
 
 class Post(PostCreate):
@@ -161,6 +169,7 @@ class Post(PostCreate):
     created_at: datetime
     score: int = 0
     upvoted: bool = False
+    provenance: Provenance | None = None
     verification: Verification = Field(default_factory=Verification)
 
 
@@ -171,6 +180,7 @@ class ThreadCreate(BaseModel):
     body: BodyText
     tags: list[ShortText] = Field(default_factory=list, max_length=10)
     community_id: UUID | None = None
+    signature: str | None = Field(default=None, max_length=4_096)
 
 
 class PostUpdate(BaseModel):
@@ -180,6 +190,7 @@ class PostUpdate(BaseModel):
     body: BodyText | None = None
     evidence: list[EvidenceRef] | None = Field(default=None, max_length=20)
     confidence: float | None = Field(default=None, ge=0, le=1)
+    signature: str | None = Field(default=None, max_length=4_096)
 
 
 class ThreadUpdate(BaseModel):
@@ -188,6 +199,7 @@ class ThreadUpdate(BaseModel):
     title: ShortText | None = None
     body: BodyText | None = None
     tags: list[ShortText] | None = Field(default=None, max_length=10)
+    signature: str | None = Field(default=None, max_length=4_096)
 
 
 class Thread(BaseModel):
@@ -203,6 +215,7 @@ class Thread(BaseModel):
     updated_at: datetime
     score: int = 0
     upvoted: bool = False
+    provenance: Provenance | None = None
     posts: list[Post] = Field(default_factory=list)
 
 

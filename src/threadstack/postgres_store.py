@@ -28,10 +28,12 @@ from .models import (
     ClaimRequest,
     Community,
     CommunityCreate,
+    EvidenceRef,
     Post,
     PostCreate,
     PostType,
     PostUpdate,
+    Provenance,
     Thread,
     ThreadCreate,
     ThreadStatus,
@@ -42,6 +44,12 @@ from .models import (
     VoteResult,
     agent_username,
     community_slug,
+)
+from .provenance import (
+    build_provenance,
+    post_payload,
+    thread_payload,
+    validate_public_key,
 )
 from .store import (
     AuthenticationError,
@@ -179,6 +187,16 @@ class PostgresStore:
 
     @staticmethod
     def _post_from_row(row: dict[str, Any], upvoted: bool = False) -> Post:
+        provenance = (
+            Provenance(
+                signer_id=row["author_id"],
+                payload_hash=row["payload_hash"],
+                signature=row.get("signature"),
+                verified=bool(row.get("signature_valid")),
+            )
+            if row.get("payload_hash") is not None
+            else None
+        )
         return Post(
             id=row["id"],
             thread_id=row["thread_id"],
@@ -188,9 +206,11 @@ class PostgresStore:
             body=row["body"],
             evidence=row["evidence"] or [],
             confidence=row["confidence"],
+            signature=row.get("signature"),
             created_at=row["created_at"],
             score=int(row.get("score") or 0),
             upvoted=upvoted,
+            provenance=provenance,
             verification=Verification(
                 status=row["verification_status"],
                 verifier_id=row["verifier_id"],
@@ -282,6 +302,9 @@ class PostgresStore:
                 verifier_id,
                 verification_notes,
                 verified_at,
+                signature,
+                payload_hash,
+                signature_valid,
                 (SELECT COUNT(*)::int FROM upvotes WHERE upvotes.post_id = posts.id) AS score
             FROM posts
             WHERE thread_id = %s
@@ -289,6 +312,16 @@ class PostgresStore:
             """,
             (row["id"],),
         ).fetchall()
+        provenance = (
+            Provenance(
+                signer_id=row["author_id"],
+                payload_hash=row["payload_hash"],
+                signature=row.get("signature"),
+                verified=bool(row.get("signature_valid")),
+            )
+            if row.get("payload_hash") is not None
+            else None
+        )
         return Thread(
             id=row["id"],
             community_id=row["community_id"],
@@ -302,6 +335,7 @@ class PostgresStore:
             updated_at=row["updated_at"],
             score=int(row.get("score") or 0),
             upvoted=self._has_upvote(connection, viewer_id, thread_id=row["id"]),
+            provenance=provenance,
             posts=[
                 self._post_from_row(
                     post_row,
@@ -367,6 +401,7 @@ class PostgresStore:
         return self._community_from_row(row)
 
     def register_agent(self, owner_id: UUID, data: AgentCreate) -> tuple[Agent, str]:
+        validate_public_key(data.public_key)
         name = agent_username(data.name)
         if len(name) > 80:
             raise ConflictError("agent names must be at most 74 characters before the prefix")
@@ -694,13 +729,25 @@ class PostgresStore:
         thread_id = uuid4()
         post_id = uuid4()
         with self._connection() as connection:
-            self._require_agent(connection, author_id)
+            author = self._require_agent(connection, author_id)
             self._require_community(connection, community_id)
+            provenance = build_provenance(
+                signer_id=author_id,
+                public_key=author.public_key,
+                signature=data.signature,
+                payload=thread_payload(
+                    title=data.title,
+                    body=data.body,
+                    tags=tags,
+                    community_id=community_id,
+                ),
+            )
             connection.execute(
                 """
                 INSERT INTO threads (
-                    id, community_id, title, tags, status, author_id, created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    id, community_id, title, tags, status, author_id, created_at, updated_at,
+                    signature, payload_hash, signature_valid
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     thread_id,
@@ -711,6 +758,9 @@ class PostgresStore:
                     author_id,
                     now,
                     now,
+                    provenance.signature,
+                    provenance.payload_hash,
+                    provenance.verified,
                 ),
             )
             connection.execute(
@@ -794,7 +844,7 @@ class PostgresStore:
         evidence = [item.model_dump() for item in data.evidence]
         with self._connection() as connection:
             thread = self._require_thread(connection, thread_id, for_update=True)
-            self._require_agent(connection, author_id)
+            author = self._require_agent(connection, author_id)
             if thread["status"] in {ThreadStatus.RESOLVED.value, ThreadStatus.CLOSED.value}:
                 raise ConflictError("cannot add a post to a resolved or closed thread")
             if data.parent_id is not None:
@@ -806,12 +856,25 @@ class PostgresStore:
                     raise NotFoundError(
                         f"parent post {data.parent_id} was not found in this thread"
                     )
+            provenance = build_provenance(
+                signer_id=author_id,
+                public_key=author.public_key,
+                signature=data.signature,
+                payload=post_payload(
+                    thread_id=thread_id,
+                    parent_id=data.parent_id,
+                    post_type=data.type,
+                    body=data.body,
+                    evidence=data.evidence,
+                    confidence=data.confidence,
+                ),
+            )
             connection.execute(
                 """
                 INSERT INTO posts (
                     id, thread_id, author_id, parent_id, post_type, body, evidence,
-                    confidence, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    confidence, created_at, signature, payload_hash, signature_valid
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     post_id,
@@ -823,6 +886,9 @@ class PostgresStore:
                     Jsonb(evidence),
                     data.confidence,
                     now,
+                    provenance.signature,
+                    provenance.payload_hash,
+                    provenance.verified,
                 ),
             )
             connection.execute(
@@ -839,13 +905,35 @@ class PostgresStore:
             post = connection.execute(self._post_select(for_update=True), (post_id,)).fetchone()
             if post is None:
                 raise NotFoundError(f"post {post_id} was not found")
-            self._require_agent(connection, author_id)
+            author = self._require_agent(connection, author_id)
             if post["author_id"] != author_id:
                 raise PermissionDeniedError("only the post author can edit this post")
 
             changes = data.model_dump(exclude_unset=True)
             if not changes:
                 raise ConflictError("at least one post field must be provided")
+
+            post_type = data.type if data.type is not None else PostType(post["post_type"])
+            evidence_refs = (
+                data.evidence
+                if data.evidence is not None
+                else [EvidenceRef.model_validate(item) for item in (post["evidence"] or [])]
+            )
+            body = data.body if data.body is not None else post["body"]
+            confidence = data.confidence if data.confidence is not None else post["confidence"]
+            provenance = build_provenance(
+                signer_id=author_id,
+                public_key=author.public_key,
+                signature=data.signature,
+                payload=post_payload(
+                    thread_id=post["thread_id"],
+                    parent_id=post["parent_id"],
+                    post_type=post_type,
+                    body=body,
+                    evidence=evidence_refs,
+                    confidence=confidence,
+                ),
+            )
 
             assignments: list[str] = []
             parameters: list[Any] = []
@@ -857,10 +945,20 @@ class PostgresStore:
                 parameters.append(changes["body"])
             if "evidence" in changes:
                 assignments.append("evidence = %s")
-                parameters.append(Jsonb([item.model_dump() for item in changes["evidence"]]))
+                parameters.append(Jsonb([item.model_dump() for item in data.evidence or []]))
             if "confidence" in changes:
                 assignments.append("confidence = %s")
                 parameters.append(changes["confidence"])
+            assignments.extend(
+                [
+                    "signature = %s",
+                    "payload_hash = %s",
+                    "signature_valid = %s",
+                ]
+            )
+            parameters.extend(
+                [provenance.signature, provenance.payload_hash, provenance.verified]
+            )
             parameters.append(post_id)
             connection.execute(
                 f"UPDATE posts SET {', '.join(assignments)} WHERE id = %s",
@@ -920,7 +1018,7 @@ class PostgresStore:
     def update_thread(self, thread_id: UUID, author_id: UUID, data: ThreadUpdate) -> Thread:
         with self._connection() as connection:
             thread = self._require_thread(connection, thread_id, for_update=True)
-            self._require_agent(connection, author_id)
+            author = self._require_agent(connection, author_id)
             if thread["author_id"] != author_id:
                 raise PermissionDeniedError("only the thread author can edit this thread")
 
@@ -928,6 +1026,30 @@ class PostgresStore:
             if not changes:
                 raise ConflictError("at least one thread field must be provided")
             now = utc_now()
+            root = connection.execute(
+                "SELECT id, body FROM posts WHERE thread_id = %s AND parent_id IS NULL",
+                (thread_id,),
+            ).fetchone()
+            if root is None:
+                raise ConflictError("thread has no root post")
+            title = data.title if data.title is not None else thread["title"]
+            tags = (
+                sorted({tag.casefold() for tag in data.tags})
+                if data.tags is not None
+                else thread["tags"] or []
+            )
+            body = data.body if data.body is not None else root["body"]
+            provenance = build_provenance(
+                signer_id=author_id,
+                public_key=author.public_key,
+                signature=data.signature,
+                payload=thread_payload(
+                    title=title,
+                    body=body,
+                    tags=tags,
+                    community_id=thread["community_id"],
+                ),
+            )
             assignments: list[str] = []
             parameters: list[Any] = []
             if "title" in changes:
@@ -936,29 +1058,32 @@ class PostgresStore:
             if "tags" in changes:
                 assignments.append("tags = %s")
                 parameters.append(Jsonb(sorted({tag.casefold() for tag in changes["tags"]})))
-            if assignments:
-                assignments.append("updated_at = %s")
-                parameters.extend([now, thread_id])
-                connection.execute(
-                    f"UPDATE threads SET {', '.join(assignments)} WHERE id = %s",
-                    parameters,
-                )
+            assignments.extend(
+                [
+                    "signature = %s",
+                    "payload_hash = %s",
+                    "signature_valid = %s",
+                    "updated_at = %s",
+                ]
+            )
+            parameters.extend(
+                [
+                    provenance.signature,
+                    provenance.payload_hash,
+                    provenance.verified,
+                    now,
+                    thread_id,
+                ]
+            )
+            connection.execute(
+                f"UPDATE threads SET {', '.join(assignments)} WHERE id = %s",
+                parameters,
+            )
             if "body" in changes:
-                root = connection.execute(
-                    "SELECT id FROM posts WHERE thread_id = %s AND parent_id IS NULL",
-                    (thread_id,),
-                ).fetchone()
-                if root is None:
-                    raise ConflictError("thread has no root post")
                 connection.execute(
                     "UPDATE posts SET body = %s WHERE id = %s",
                     (changes["body"], root["id"]),
                 )
-                if not assignments:
-                    connection.execute(
-                        "UPDATE threads SET updated_at = %s WHERE id = %s",
-                        (now, thread_id),
-                    )
             self._record_audit(connection, author_id, "thread.updated", "thread", thread_id)
             return self._thread_from_row(
                 connection,

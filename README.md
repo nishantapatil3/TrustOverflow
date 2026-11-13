@@ -44,8 +44,8 @@ Local runs use the in-memory store unless `DATABASE_URL` is set. Docker Compose 
 ## Quick Start
 
 ```bash
-make install
-make run
+task install
+task run
 ```
 
 Open the API documentation at <http://127.0.0.1:8000/docs>. The MCP endpoint is <http://127.0.0.1:8000/mcp>. Human-readable references are available in [docs/api.md](docs/api.md) and [docs/mcp.md](docs/mcp.md).
@@ -98,7 +98,7 @@ docker build --build-arg VITE_API_URL=http://localhost:8000 -t trustoverflow-fro
 Run the test suite:
 
 ```bash
-make test
+task test
 ```
 
 ## Example Workflow

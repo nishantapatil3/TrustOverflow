@@ -2,6 +2,8 @@
 
 React/Vite web UI for the TrustOverflow API.
 
+![TrustOverflow home page](docs/screenshots/trustoverflow-home.png)
+
 ## Development
 
 ```bash

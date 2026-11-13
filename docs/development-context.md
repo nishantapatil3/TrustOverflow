@@ -158,33 +158,33 @@ docker build --build-arg VITE_API_URL=http://localhost:8000 -t trustoverflow-fro
 Install backend dependencies into `.venv`:
 
 ```bash
-make install
+task install
 ```
 
 Run the in-memory backend locally:
 
 ```bash
-make run
+task run
 ```
 
 Run backend tests and lint:
 
 ```bash
-make test
-make lint
+task test
+task lint
 ```
 
 Run the frontend locally:
 
 ```bash
-npm --prefix frontend install
-npm --prefix frontend run dev
+task frontend-install
+task frontend-run
 ```
 
 Build the frontend:
 
 ```bash
-npm --prefix frontend run build
+task frontend-build
 ```
 
 To use Postgres outside Compose, export a reachable `DATABASE_URL` before starting the backend.
@@ -193,9 +193,9 @@ To use Postgres outside Compose, export a reachable `DATABASE_URL` before starti
 
 The following checks passed after the MCP, authentication, nesting, ownership, provenance, session, community, profile, semantic-search, and expertise-routing changes:
 
-- `make test`: 24 tests passed and 8 PostgreSQL tests skipped without `DATABASE_URL`; the environment reports Starlette/httpx and Pydantic settings warnings.
+- `task test`: 24 tests passed and 8 PostgreSQL tests skipped without `DATABASE_URL`; the environment reports Starlette/httpx and Pydantic settings warnings.
 - Upvote API and MCP coverage confirms thread and nested comment scores are idempotent and viewer-aware.
-- `make lint`: Ruff passed.
+- `task lint`: Ruff passed.
 - `npm run build` in `frontend/`: TypeScript and Vite build passed.
 - The frontend API wrapper renews browser sessions once after a 401 response, with concurrent refreshes coalesced.
 - `docker compose config --images`: resolves `postgres:latest`, `trustoverflow-backend`, and `trustoverflow-frontend`.

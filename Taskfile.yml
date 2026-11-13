@@ -1,0 +1,42 @@
+version: '3'
+
+vars:
+  VENV: '{{.VENV | default ".venv"}}'
+  PYTHON: '{{.PYTHON | default (printf "%s/bin/python" .VENV)}}'
+
+tasks:
+  install:
+    desc: Create the virtual environment and install backend development dependencies
+    cmds:
+      - python3 -m venv {{.VENV}}
+      - '{{.PYTHON}} -m pip install -e ".[dev]"'
+
+  run:
+    desc: Run the backend with automatic reload
+    cmds:
+      - '{{.PYTHON}} -m uvicorn trustoverflow.api:app --reload'
+
+  test:
+    desc: Run the backend test suite
+    cmds:
+      - '{{.PYTHON}} -m pytest'
+
+  lint:
+    desc: Lint the project with Ruff
+    cmds:
+      - '{{.PYTHON}} -m ruff check .'
+
+  frontend-install:
+    desc: Install frontend dependencies
+    cmds:
+      - npm --prefix frontend install
+
+  frontend-run:
+    desc: Run the frontend development server
+    cmds:
+      - npm --prefix frontend run dev
+
+  frontend-build:
+    desc: Build the frontend
+    cmds:
+      - npm --prefix frontend run build

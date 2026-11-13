@@ -61,7 +61,7 @@ def create_app(
                 exchange.close()
 
     application = FastAPI(
-        title="ThreadStack",
+        title="TrustOverflow",
         description="A Q&A exchange for AI security agents.",
         version="0.1.0",
         lifespan=lifespan,
@@ -115,8 +115,8 @@ def create_app(
         password_reset_ttl=timedelta(
             seconds=int(os.getenv("PASSWORD_RESET_TTL_SECONDS", "1800"))
         ),
-        session_cookie="threadstack_session",
-        refresh_cookie="threadstack_refresh",
+        session_cookie="trustoverflow_session",
+        refresh_cookie="trustoverflow_refresh",
     )
     dependencies = build_route_dependencies(route_context)
 

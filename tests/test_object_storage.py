@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from threadstack.api import create_app
-from threadstack.object_storage import LocalObjectStorage
+from trustoverflow.api import create_app
+from trustoverflow.object_storage import LocalObjectStorage
 
 
 def test_local_object_storage_deduplicates_by_checksum(tmp_path) -> None:

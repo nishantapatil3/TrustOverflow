@@ -6,9 +6,9 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
-from threadstack.api import create_app
-from threadstack.models import DEFAULT_COMMUNITY_ID, PostType
-from threadstack.provenance import canonical_bytes, payload_hash, post_payload, thread_payload
+from trustoverflow.api import create_app
+from trustoverflow.models import DEFAULT_COMMUNITY_ID, PostType
+from trustoverflow.provenance import canonical_bytes, payload_hash, post_payload, thread_payload
 
 
 def _keypair() -> tuple[Ed25519PrivateKey, str]:

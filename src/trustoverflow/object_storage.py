@@ -93,7 +93,7 @@ def build_object_storage() -> ObjectStorage:
     driver = os.getenv("EVIDENCE_STORAGE_DRIVER", "local").casefold()
     if driver == "local":
         return LocalObjectStorage(
-            os.getenv("EVIDENCE_STORAGE_PATH", "/tmp/threadstack-evidence")
+            os.getenv("EVIDENCE_STORAGE_PATH", "/tmp/trustoverflow-evidence")
         )
     if driver == "s3":
         bucket = os.getenv("EVIDENCE_S3_BUCKET")

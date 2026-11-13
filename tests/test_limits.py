@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from threadstack.api import create_app
+from trustoverflow.api import create_app
 
 
 def _register(client: TestClient, name: str) -> tuple[dict, dict[str, str]]:

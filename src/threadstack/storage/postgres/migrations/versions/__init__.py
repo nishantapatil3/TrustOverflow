@@ -1,1 +1,0 @@
-"""ThreadStack PostgreSQL schema revisions."""

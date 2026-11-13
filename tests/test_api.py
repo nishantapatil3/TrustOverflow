@@ -3,7 +3,7 @@ from uuid import UUID
 
 from fastapi.testclient import TestClient
 
-from threadstack.api import create_app
+from trustoverflow.api import create_app
 
 DEFAULT_PASSWORD = "correct-horse-battery-staple"
 
@@ -512,14 +512,14 @@ def test_browser_sessions_rotate_refresh_tokens_and_revoke_reuse_families() -> N
         json={"email": "refresh-owner@example.com", "password": DEFAULT_PASSWORD},
     )
     assert first.status_code == 200
-    old_access = client.cookies.get("threadstack_session")
-    old_refresh = client.cookies.get("threadstack_refresh")
+    old_access = client.cookies.get("trustoverflow_session")
+    old_refresh = client.cookies.get("trustoverflow_refresh")
     assert old_access and old_refresh
 
     refreshed = client.post("/auth/refresh")
     assert refreshed.status_code == 200
-    new_access = client.cookies.get("threadstack_session")
-    new_refresh = client.cookies.get("threadstack_refresh")
+    new_access = client.cookies.get("trustoverflow_session")
+    new_refresh = client.cookies.get("trustoverflow_refresh")
     assert new_access and new_refresh
     assert new_access != old_access
     assert new_refresh != old_refresh
@@ -529,11 +529,11 @@ def test_browser_sessions_rotate_refresh_tokens_and_revoke_reuse_families() -> N
         == 401
     )
 
-    client.cookies.set("threadstack_refresh", old_refresh)
+    client.cookies.set("trustoverflow_refresh", old_refresh)
     replay = client.post("/auth/refresh")
     assert replay.status_code == 401
 
-    client.cookies.set("threadstack_refresh", new_refresh)
+    client.cookies.set("trustoverflow_refresh", new_refresh)
     assert client.post("/auth/refresh").status_code == 401
 
 
@@ -547,7 +547,7 @@ def test_first_email_login_creates_a_user_who_can_own_multiple_agents() -> None:
     )
     assert response.status_code == 200
     assert response.json()["first_login"] is True
-    assert client.cookies.get("threadstack_session")
+    assert client.cookies.get("trustoverflow_session")
     user = response.json()["user"]
     assert user["email"] == "octo.cat@example.com"
     assert user["account_type"] == "user"
@@ -598,7 +598,7 @@ def test_returning_email_login_requires_the_original_password() -> None:
         json={"email": "owner@example.com", "password": "different-password"},
     )
     assert rejected.status_code == 401
-    assert client.cookies.get("threadstack_session") is None
+    assert client.cookies.get("trustoverflow_session") is None
 
     returning = client.post(
         "/auth/login",
@@ -615,7 +615,7 @@ def test_password_reset_is_private_one_time_and_revokes_sessions() -> None:
     sender = CapturingEmailSender()
     client = TestClient(create_app(email_sender=sender))
     sign_in_owner(client, email="reset-owner@example.com")
-    old_access = client.cookies.get("threadstack_session")
+    old_access = client.cookies.get("trustoverflow_session")
     assert old_access
 
     existing = client.post(

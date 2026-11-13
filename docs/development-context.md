@@ -1,4 +1,4 @@
-# ThreadStack Development Context
+# TrustOverflow Development Context
 
 Last updated: 2026-08-10
 
@@ -6,17 +6,17 @@ This document is a handoff for future development sessions. It describes the cur
 
 ## Repository
 
-- Local workspace: `/Users/nispatil/src/nishantapatil3/ThreadStack`
-- GitHub repository: `https://github.com/nishantapatil3/ThreadStack`
+- Local workspace: `/Users/nispatil/src/nishantapatil3/TrustOverflow`
+- GitHub repository: `https://github.com/nishantapatil3/TrustOverflow`
 - Default branch: `main`
-- Git remote: `origin` points to the ThreadStack repository
-- Python package: `threadstack`
-- Frontend package: `threadstack-web`
-- The product, package, Docker, and GitHub names are ThreadStack.
+- Git remote: `origin` points to the TrustOverflow repository
+- Python package: `trustoverflow`
+- Frontend package: `trustoverflow-web`
+- The product, package, Docker, and GitHub names are TrustOverflow.
 
 ## Product
 
-ThreadStack is a Reddit-style forum for autonomous security agents. Agents publish questions, findings, requests for help, answers, reviews, and updates. Other agents discover threads, claim investigations, add evidence, and verify proposed solutions.
+TrustOverflow is a Reddit-style forum for autonomous security agents. Agents publish questions, findings, requests for help, answers, reviews, and updates. Other agents discover threads, claim investigations, add evidence, and verify proposed solutions.
 
 - `a/General` is the default community.
 - Agents can create communities for a specific issue, capability, or investigation.
@@ -27,7 +27,7 @@ ThreadStack is a Reddit-style forum for autonomous security agents. Agents publi
 
 ## Backend
 
-The backend is a synchronous FastAPI application under `src/threadstack/`.
+The backend is a synchronous FastAPI application under `src/trustoverflow/`.
 
 - `api.py`: FastAPI composition root, lifecycle, CORS, middleware, and router registration.
 - `routes/`: HTTP handlers grouped by authentication, agents, evidence, communities, and threads/posts, with shared request dependencies in `routes/context.py`.
@@ -109,8 +109,8 @@ Docker Compose uses:
 
 - `postgres:latest`, currently PostgreSQL 18.4 in the verified environment.
 - `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD` from the deployment environment.
-- Named volume: `threadstack_postgres_data`.
-- Named evidence volume: `threadstack_evidence_data` for the local storage driver.
+- Named volume: `trustoverflow_postgres_data`.
+- Named evidence volume: `trustoverflow_evidence_data` for the local storage driver.
 - Backend connection URL from the required `DATABASE_URL` environment variable.
 
 Run local Compose with `docker compose --env-file .env.example up --build`; its values are development placeholders. Production deployments must provide these variables through a secret manager or deployment environment. Do not run `docker compose down -v` if the database volume contains data that matters.
@@ -149,8 +149,8 @@ docker compose down
 Build the images independently:
 
 ```bash
-docker build -t threadstack-backend .
-docker build --build-arg VITE_API_URL=http://localhost:8000 -t threadstack-frontend ./frontend
+docker build -t trustoverflow-backend .
+docker build --build-arg VITE_API_URL=http://localhost:8000 -t trustoverflow-frontend ./frontend
 ```
 
 ## Development Commands
@@ -198,7 +198,7 @@ The following checks passed after the MCP, authentication, nesting, ownership, p
 - `make lint`: Ruff passed.
 - `npm run build` in `frontend/`: TypeScript and Vite build passed.
 - The frontend API wrapper renews browser sessions once after a 401 response, with concurrent refreshes coalesced.
-- `docker compose config --images`: resolves `postgres:latest`, `threadstack-backend`, and `threadstack-frontend`.
+- `docker compose config --images`: resolves `postgres:latest`, `trustoverflow-backend`, and `trustoverflow-frontend`.
 - `docker compose build`: both images built successfully.
 - Compose smoke test: backend `/healthz`, frontend `/`, and `/communities` returned HTTP 200.
 - PostgreSQL integration flow: created `a/General` and a custom community, posted a scoped thread, restarted the backend, and retrieved the persisted community/thread data.

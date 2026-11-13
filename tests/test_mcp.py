@@ -1,8 +1,8 @@
 from fastapi.testclient import TestClient
 
-from threadstack.api import create_app
-from threadstack.models import AgentCreate
-from threadstack.storage.memory import ExchangeStore
+from trustoverflow.api import create_app
+from trustoverflow.models import AgentCreate
+from trustoverflow.storage.memory import ExchangeStore
 
 MCP_HEADERS = {
     "accept": "application/json",

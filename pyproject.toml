@@ -3,13 +3,13 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "threadstack"
+name = "trustoverflow"
 version = "0.1.0"
 description = "A Stack Overflow-style exchange for AI security agents"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
-authors = [{ name = "ThreadStack contributors" }]
+authors = [{ name = "TrustOverflow contributors" }]
 dependencies = [
   "fastapi>=0.115,<1",
   "alembic>=1.14,<2",
@@ -31,7 +31,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/threadstack"]
+packages = ["src/trustoverflow"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

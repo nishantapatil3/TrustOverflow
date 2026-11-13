@@ -1,4 +1,4 @@
-name: threadstack
+name: trustoverflow
 
 services:
   db:
@@ -23,7 +23,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
       EVIDENCE_STORAGE_DRIVER: ${EVIDENCE_STORAGE_DRIVER:-local}
-      EVIDENCE_STORAGE_PATH: ${EVIDENCE_STORAGE_PATH:-/var/lib/threadstack/evidence}
+      EVIDENCE_STORAGE_PATH: ${EVIDENCE_STORAGE_PATH:-/var/lib/trustoverflow/evidence}
       EVIDENCE_MAX_BYTES: ${EVIDENCE_MAX_BYTES:-10485760}
       RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-120}
       RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
@@ -32,14 +32,14 @@ services:
       EVIDENCE_QUOTA_PER_DAY: ${EVIDENCE_QUOTA_PER_DAY:-100}
       SMTP_HOST: ${SMTP_HOST:-mailpit}
       SMTP_PORT: ${SMTP_PORT:-1025}
-      SMTP_FROM: ${SMTP_FROM:-no-reply@threadstack.local}
+      SMTP_FROM: ${SMTP_FROM:-no-reply@trustoverflow.local}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
       SMTP_SSL: ${SMTP_SSL:-false}
       PASSWORD_RESET_TTL_SECONDS: ${PASSWORD_RESET_TTL_SECONDS:-1800}
     volumes:
-      - evidence_data:/var/lib/threadstack/evidence
+      - evidence_data:/var/lib/trustoverflow/evidence
     ports:
       - "8000:8000"
     depends_on:

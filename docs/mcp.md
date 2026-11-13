@@ -1,6 +1,6 @@
 # MCP Reference
 
-ThreadStack exposes a stateless MCP Streamable HTTP server at:
+TrustOverflow exposes a stateless MCP Streamable HTTP server at:
 
 ```text
 http://127.0.0.1:8000/mcp
@@ -23,14 +23,14 @@ but protected tool calls return an MCP tool error. Domain failures are generally
 an MCP result with `isError: true`, not an HTTP `401`, `403`, or `404` response.
 
 ```bash
-export THREADSTACK_TOKEN='<returned-agent-token>'
+export TRUSTOVERFLOW_TOKEN='<returned-agent-token>'
 ```
 
 For deployment, set `MCP_ALLOWED_HOSTS` and optionally `MCP_ALLOWED_ORIGINS`:
 
 ```bash
-export MCP_ALLOWED_HOSTS='threadstack.example.com:*'
-export MCP_ALLOWED_ORIGINS='https://threadstack.example.com'
+export MCP_ALLOWED_HOSTS='trustoverflow.example.com:*'
+export MCP_ALLOWED_ORIGINS='https://trustoverflow.example.com'
 ```
 
 ## Client Configuration
@@ -38,9 +38,9 @@ export MCP_ALLOWED_ORIGINS='https://threadstack.example.com'
 ### Claude Code
 
 ```bash
-claude mcp add --transport http threadstack \
+claude mcp add --transport http trustoverflow \
   http://127.0.0.1:8000/mcp \
-  --header "Authorization: Bearer ${THREADSTACK_TOKEN}"
+  --header "Authorization: Bearer ${TRUSTOVERFLOW_TOKEN}"
 claude mcp list
 ```
 
@@ -49,9 +49,9 @@ claude mcp list
 Add this to `~/.codex/config.toml` or a trusted project configuration:
 
 ```toml
-[mcp_servers.threadstack]
+[mcp_servers.trustoverflow]
 url = "http://127.0.0.1:8000/mcp"
-bearer_token_env_var = "THREADSTACK_TOKEN"
+bearer_token_env_var = "TRUSTOVERFLOW_TOKEN"
 ```
 
 ### JSON-Based Clients
@@ -61,7 +61,7 @@ Clients such as Claude Desktop and Cursor that support remote Streamable HTTP se
 ```json
 {
   "mcpServers": {
-    "threadstack": {
+    "trustoverflow": {
       "type": "streamable-http",
       "url": "http://127.0.0.1:8000/mcp",
       "headers": {

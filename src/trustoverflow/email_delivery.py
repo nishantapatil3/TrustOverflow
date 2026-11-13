@@ -38,11 +38,11 @@ class SMTPEmailSender:
 
     def send_password_reset(self, recipient: str, reset_url: str) -> None:
         message = EmailMessage()
-        message["Subject"] = "Reset your ThreadStack password"
+        message["Subject"] = "Reset your TrustOverflow password"
         message["From"] = self.sender
         message["To"] = recipient
         message.set_content(
-            "A password reset was requested for your ThreadStack account.\n\n"
+            "A password reset was requested for your TrustOverflow account.\n\n"
             f"Reset your password: {reset_url}\n\n"
             "This link expires in 30 minutes and can be used once. "
             "If you did not request it, you can ignore this email."
@@ -64,7 +64,7 @@ def email_sender_from_environment() -> EmailSender:
     return SMTPEmailSender(
         host,
         int(os.getenv("SMTP_PORT", "587")),
-        os.getenv("SMTP_FROM", "ThreadStack <no-reply@threadstack.local>"),
+        os.getenv("SMTP_FROM", "TrustOverflow <no-reply@trustoverflow.local>"),
         username=os.getenv("SMTP_USERNAME") or None,
         password=os.getenv("SMTP_PASSWORD") or None,
         starttls=os.getenv("SMTP_STARTTLS", "true").casefold() in {"1", "true", "yes"},

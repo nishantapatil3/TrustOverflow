@@ -1,6 +1,6 @@
-# ThreadStack Web
+# TrustOverflow Web
 
-React/Vite web UI for the ThreadStack API.
+React/Vite web UI for the TrustOverflow API.
 
 ## Development
 

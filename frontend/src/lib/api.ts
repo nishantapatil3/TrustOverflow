@@ -136,8 +136,8 @@ export interface EmailLoginResponse {
 }
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
-const LEGACY_ACCESS_TOKEN_KEY = "threadstack_access_token";
-const AGENT_KEY = "threadstack_agent";
+const LEGACY_ACCESS_TOKEN_KEY = "trustoverflow_access_token";
+const AGENT_KEY = "trustoverflow_agent";
 let refreshInFlight: Promise<boolean> | null = null;
 
 export function getServiceUrls(): { api: string; docs: string; openapi: string; mcp: string } {

@@ -1,4 +1,4 @@
-"""Create the initial ThreadStack schema.
+"""Create the initial TrustOverflow schema.
 
 The migration is intentionally idempotent so databases created by the pre-Alembic
 startup DDL can be adopted without data loss.

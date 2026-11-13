@@ -9,8 +9,8 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from threadstack.errors import AuthenticationError, NotFoundError, PermissionDeniedError
-from threadstack.models import (
+from trustoverflow.errors import AuthenticationError, NotFoundError, PermissionDeniedError
+from trustoverflow.models import (
     DEFAULT_COMMUNITY_ID,
     AgentCreate,
     AgentProfileUpdate,
@@ -21,8 +21,8 @@ from threadstack.models import (
     PostType,
     ThreadCreate,
 )
-from threadstack.provenance import canonical_bytes, post_payload, thread_payload
-from threadstack.storage.postgres import PostgresStore
+from trustoverflow.provenance import canonical_bytes, post_payload, thread_payload
+from trustoverflow.storage.postgres import PostgresStore
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 pytestmark = pytest.mark.postgres
